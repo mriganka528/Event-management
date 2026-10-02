@@ -1,0 +1,58 @@
+{
+    "name": "event-management",
+    "version": "0.1.0",
+    "private": true,
+    "engines": {
+        "node": ">=20.9.0"
+    },
+    "scripts": {
+        "dev": "node server.mjs",
+        "build": "next build",
+        "start": "node server.mjs --production",
+        "lint": "eslint",
+        "test": "tsx --conditions=react-server --test tests/*.test.ts",
+        "prisma:generate": "prisma generate",
+        "db:push": "prisma db push",
+        "db:migrate": "prisma migrate deploy",
+        "db:seed": "tsx prisma/seed.ts",
+        "db:clean-demo": "tsx prisma/clean-demo-data.ts",
+        "db:harden": "tsx prisma/harden-invariants.ts",
+        "admin:bootstrap": "tsx --conditions=react-server prisma/bootstrap-admin.ts",
+        "auth:reset": "tsx prisma/reset-auth.ts"
+    },
+    "dependencies": {
+        "@clerk/nextjs": "^7.9.8",
+        "@prisma/client": "^6.19.2",
+        "class-variance-authority": "^0.7.1",
+        "cloudinary": "^2.11.0",
+        "clsx": "^2.1.1",
+        "date-fns": "^4.1.0",
+        "dotenv": "^17.3.1",
+        "lucide-react": "^0.577.0",
+        "next": "16.1.6",
+        "nodemailer": "^10.0.10",
+        "pdf-lib": "^1.17.1",
+        "prisma": "^6.19.2",
+        "razorpay": "^2.9.8",
+        "react": "19.2.3",
+        "react-dom": "19.2.3",
+        "react-hot-toast": "^2.6.1",
+        "socket.io": "^4.8.3",
+        "socket.io-client": "^4.8.3",
+        "tailwind-merge": "^3.5.0",
+        "zod": "^4.3.6"
+    },
+    "devDependencies": {
+        "@tailwindcss/postcss": "^4",
+        "@types/node": "^20",
+        "@types/nodemailer": "^8.0.2",
+        "@types/react": "^19",
+        "@types/react-dom": "^19",
+        "eslint": "^9",
+        "eslint-config-next": "16.1.6",
+        "server-only": "^0.0.1",
+        "tailwindcss": "^4",
+        "tsx": "^4.21.0",
+        "typescript": "^5"
+    }
+}

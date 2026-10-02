@@ -1,0 +1,683 @@
+@import "tailwindcss";
+
+:root {
+  color-scheme: light;
+  --background: #f7f1e8;
+  --foreground: #1e1b16;
+  --card: #fffdf9;
+  --card-elevated: #ffffff;
+  --muted: #6f665b;
+  --muted-strong: #51483e;
+  --line: rgba(53, 41, 26, 0.12);
+  --line-strong: rgba(53, 41, 26, 0.2);
+  --brand: #d38a16;
+  --brand-dark: #8e5710;
+  --brand-soft: #fff4d9;
+  --brand-softer: #fffaf0;
+  --surface: #efe4d2;
+  --surface-muted: #f8f2e9;
+  --surface-strong: #e7dac7;
+  --input: #fffdf9;
+  --success-soft: #ecf8ef;
+  --success-text: #276545;
+  --warning-soft: #fff7df;
+  --warning-text: #8a5b12;
+  --danger-soft: #fff0f0;
+  --danger-text: #9b3434;
+  --info-soft: #eef5ff;
+  --info-text: #315b91;
+  --shadow-color: 61 40 14;
+
+  /* Admin sidebar surface - follows the active theme. */
+  --sidebar-bg: linear-gradient(180deg, #fffdf9, #f6efe2);
+  --sidebar-fg: #1e1b16;
+  --sidebar-muted: #6f665b;
+  --sidebar-line: rgba(53, 41, 26, 0.12);
+  --sidebar-hover: rgba(53, 41, 26, 0.06);
+  --sidebar-active-bg: linear-gradient(135deg, #f7d194, #d38a16);
+  --sidebar-active-fg: #1e1b16;
+  --sidebar-accent: #8e5710;
+  --sidebar-shadow: 0 24px 70px rgba(61, 40, 14, 0.12);
+}
+
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --background: #15110f;
+  --foreground: #f5eee7;
+  --card: #211b18;
+  --card-elevated: #2a231f;
+  --muted: #c4b8ac;
+  --muted-strong: #e2d7cb;
+  --line: rgba(255, 244, 230, 0.13);
+  --line-strong: rgba(255, 244, 230, 0.24);
+  --brand: #efb255;
+  --brand-dark: #f7d194;
+  --brand-soft: rgba(239, 178, 85, 0.18);
+  --brand-softer: rgba(239, 178, 85, 0.1);
+  --surface: #2a231f;
+  --surface-muted: #2a231f;
+  --surface-strong: #3a2e26;
+  --input: #211b18;
+  --success-soft: rgba(52, 211, 153, 0.14);
+  --success-text: #86efac;
+  --warning-soft: rgba(251, 191, 36, 0.15);
+  --warning-text: #fcd34d;
+  --danger-soft: rgba(248, 113, 113, 0.14);
+  --danger-text: #fca5a5;
+  --info-soft: rgba(96, 165, 250, 0.14);
+  --info-text: #93c5fd;
+  --shadow-color: 0 0 0;
+
+  /* Admin sidebar surface - follows the active theme. */
+  --sidebar-bg: linear-gradient(180deg, #241d19, #171310);
+  --sidebar-fg: #f5eee7;
+  --sidebar-muted: rgba(245, 238, 231, 0.62);
+  --sidebar-line: rgba(255, 244, 230, 0.12);
+  --sidebar-hover: rgba(255, 255, 255, 0.08);
+  --sidebar-active-bg: linear-gradient(135deg, #f7d194, #d38a16);
+  --sidebar-active-fg: #1e1b16;
+  --sidebar-accent: #efb255;
+  --sidebar-shadow: 0 24px 70px rgba(0, 0, 0, 0.45);
+}
+
+@theme inline {
+  --font-sans: var(--font-sans);
+  --font-display: var(--font-display);
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html {
+  min-width: 320px;
+  scroll-behavior: smooth;
+  background: var(--background);
+}
+
+body {
+  margin: 0;
+  min-width: 320px;
+  min-height: 100vh;
+  overflow-x: hidden;
+  background:
+    radial-gradient(circle at top right, rgba(211, 138, 22, 0.14), transparent 24%),
+    radial-gradient(circle at bottom left, rgba(91, 55, 14, 0.12), transparent 30%),
+    var(--background);
+  color: var(--foreground);
+  font-family: var(--font-sans), sans-serif;
+  text-rendering: optimizeLegibility;
+  transition: background-color 0.25s ease, color 0.25s ease;
+}
+
+h1,
+h2,
+h3,
+h4 {
+  font-family: var(--font-display), serif;
+  text-wrap: balance;
+}
+
+p,
+li,
+td,
+th,
+label,
+summary {
+  overflow-wrap: anywhere;
+}
+
+a {
+  color: inherit;
+  text-decoration: none;
+}
+
+button,
+a,
+input,
+textarea,
+select,
+summary {
+  -webkit-tap-highlight-color: transparent;
+}
+
+button,
+summary,
+select {
+  cursor: pointer;
+}
+
+input,
+textarea,
+select,
+button {
+  font: inherit;
+}
+
+input[type="date"],
+input[type="datetime-local"] {
+  min-width: 0;
+}
+
+::selection {
+  background: color-mix(in srgb, var(--brand) 32%, transparent);
+  color: var(--foreground);
+}
+
+.container-shell {
+  width: min(1200px, calc(100% - 2rem));
+  margin-inline: auto;
+}
+
+.glass-panel {
+  background: color-mix(in srgb, var(--card) 78%, transparent);
+  backdrop-filter: blur(14px);
+}
+
+.grid-pattern {
+  background-image:
+    linear-gradient(to right, color-mix(in srgb, var(--foreground) 10%, transparent) 1px, transparent 1px),
+    linear-gradient(to bottom, color-mix(in srgb, var(--foreground) 10%, transparent) 1px, transparent 1px);
+  background-size: 32px 32px;
+}
+
+/* Semantic compatibility for legacy utility classes used by older screens.
+
+   Each rule lists TWO selectors on purpose:
+
+     [class~="bg-stone-100"]   the exact class token, at any position
+     [class*=":bg-stone-100"]  the same utility behind a variant prefix
+
+   The second one is what makes `hover:bg-stone-100` and `md:bg-stone-100`
+   follow the theme. An attribute-exact selector alone can never match a
+   variant, because the class token is `hover:bg-stone-100`, not `bg-stone-100`,
+   so every hover, focus, and responsive colour silently kept its light value in
+   dark mode - a light block flashing under the pointer on a dark page.
+
+   Matching on `:utility` rather than a bare substring keeps this precise:
+   `bg-stone-500` contains the text "bg-stone-50", but it has no variant prefix,
+   so it is never captured by the rule for `bg-stone-50`. */
+:root[data-theme="dark"] [class~="bg-white"],
+:root[data-theme="dark"] [class*=":bg-white"] {
+  background-color: var(--card) !important;
+}
+
+:root[data-theme="dark"] [class~="bg-white/70"],
+:root[data-theme="dark"] [class*=":bg-white/70"] {
+  background-color: color-mix(in srgb, var(--card) 78%, transparent) !important;
+}
+
+:root[data-theme="dark"] [class~="bg-white/5"],
+:root[data-theme="dark"] [class~="bg-white/6"],
+:root[data-theme="dark"] [class~="bg-white/7"],
+:root[data-theme="dark"] [class~="bg-white/8"],
+:root[data-theme="dark"] [class~="bg-white/10"],
+:root[data-theme="dark"] [class*=":bg-white/5"],
+:root[data-theme="dark"] [class*=":bg-white/6"],
+:root[data-theme="dark"] [class*=":bg-white/7"],
+:root[data-theme="dark"] [class*=":bg-white/8"],
+:root[data-theme="dark"] [class*=":bg-white/10"] {
+  background-color: rgba(255, 255, 255, 0.07) !important;
+}
+
+:root[data-theme="dark"] [class~="bg-stone-50"],
+:root[data-theme="dark"] [class~="bg-stone-50/40"],
+:root[data-theme="dark"] [class~="bg-stone-50/60"],
+:root[data-theme="dark"] [class*=":bg-stone-50"],
+:root[data-theme="dark"] [class*=":bg-stone-50/40"],
+:root[data-theme="dark"] [class*=":bg-stone-50/60"] {
+  background-color: var(--surface-muted) !important;
+}
+
+:root[data-theme="dark"] [class~="bg-stone-100"],
+:root[data-theme="dark"] [class*=":bg-stone-100"] {
+  background-color: var(--surface-strong) !important;
+}
+
+:root[data-theme="dark"] [class~="bg-stone-200"],
+:root[data-theme="dark"] [class*=":bg-stone-200"] {
+  background-color: var(--surface-strong) !important;
+}
+
+:root[data-theme="dark"] [class~="border-stone-100"],
+:root[data-theme="dark"] [class~="border-stone-200"],
+:root[data-theme="dark"] [class~="border-stone-300"],
+:root[data-theme="dark"] [class*=":border-stone-100"],
+:root[data-theme="dark"] [class*=":border-stone-200"],
+:root[data-theme="dark"] [class*=":border-stone-300"] {
+  border-color: var(--line) !important;
+}
+
+:root[data-theme="dark"] [class~="text-stone-900"],
+:root[data-theme="dark"] [class~="text-stone-800"],
+:root[data-theme="dark"] [class~="text-stone-700"],
+:root[data-theme="dark"] [class~="text-stone-600"],
+:root[data-theme="dark"] [class*=":text-stone-900"],
+:root[data-theme="dark"] [class*=":text-stone-800"],
+:root[data-theme="dark"] [class*=":text-stone-700"],
+:root[data-theme="dark"] [class*=":text-stone-600"] {
+  color: var(--foreground) !important;
+}
+
+:root[data-theme="dark"] [class~="text-stone-500"],
+:root[data-theme="dark"] [class~="text-stone-400"],
+:root[data-theme="dark"] [class*=":text-stone-500"],
+:root[data-theme="dark"] [class*=":text-stone-400"] {
+  color: var(--muted) !important;
+}
+
+:root[data-theme="dark"] [class~="bg-amber-50"],
+:root[data-theme="dark"] [class~="bg-amber-50/40"],
+:root[data-theme="dark"] [class~="bg-amber-50/50"],
+:root[data-theme="dark"] [class~="bg-amber-50/60"],
+:root[data-theme="dark"] [class*=":bg-amber-50"],
+:root[data-theme="dark"] [class*=":bg-amber-50/40"],
+:root[data-theme="dark"] [class*=":bg-amber-50/50"],
+:root[data-theme="dark"] [class*=":bg-amber-50/60"] {
+  background-color: var(--brand-softer) !important;
+}
+
+:root[data-theme="dark"] [class~="bg-amber-100"],
+:root[data-theme="dark"] [class*=":bg-amber-100"] {
+  background-color: var(--brand-soft) !important;
+}
+
+/* A hover on a soft brand wash, seen on the admin dashboard tiles. Without these
+   the hover state stayed near-white and glared against the dark surface. */
+:root[data-theme="dark"] [class~="bg-amber-200"],
+:root[data-theme="dark"] [class*=":bg-amber-200"],
+:root[data-theme="dark"] [class~="bg-amber-300"],
+:root[data-theme="dark"] [class*=":bg-amber-300"] {
+  background-color: color-mix(in srgb, var(--brand-soft) 85%, var(--brand)) !important;
+}
+
+:root[data-theme="dark"] [class~="text-amber-600"],
+:root[data-theme="dark"] [class~="text-amber-500"],
+:root[data-theme="dark"] [class~="text-amber-950"],
+:root[data-theme="dark"] [class~="text-amber-900/70"],
+:root[data-theme="dark"] [class~="text-amber-900/80"],
+:root[data-theme="dark"] [class~="text-amber-900"],
+:root[data-theme="dark"] [class~="text-amber-800"],
+:root[data-theme="dark"] [class~="text-amber-700"],
+:root[data-theme="dark"] [class*=":text-amber-600"],
+:root[data-theme="dark"] [class*=":text-amber-500"],
+:root[data-theme="dark"] [class*=":text-amber-950"],
+:root[data-theme="dark"] [class*=":text-amber-900/70"],
+:root[data-theme="dark"] [class*=":text-amber-900/80"],
+:root[data-theme="dark"] [class*=":text-amber-900"],
+:root[data-theme="dark"] [class*=":text-amber-800"],
+:root[data-theme="dark"] [class*=":text-amber-700"] {
+  color: var(--brand-dark) !important;
+}
+
+:root[data-theme="dark"] [class~="bg-violet-100"],
+:root[data-theme="dark"] [class*=":bg-violet-100"] {
+  background-color: rgba(167, 139, 250, 0.16) !important;
+}
+
+:root[data-theme="dark"] [class~="text-violet-800"],
+:root[data-theme="dark"] [class*=":text-violet-800"] {
+  color: #c4b5fd !important;
+}
+
+:root[data-theme="dark"] [class~="bg-sky-100"],
+:root[data-theme="dark"] [class*=":bg-sky-100"] {
+  background-color: rgba(125, 211, 252, 0.16) !important;
+}
+
+:root[data-theme="dark"] [class~="text-sky-800"],
+:root[data-theme="dark"] [class*=":text-sky-800"] {
+  color: #7dd3fc !important;
+}
+
+:root[data-theme="dark"] [class~="bg-blue-100"],
+:root[data-theme="dark"] [class*=":bg-blue-100"] {
+  background-color: rgba(96, 165, 250, 0.16) !important;
+}
+
+:root[data-theme="dark"] [class~="text-blue-800"],
+:root[data-theme="dark"] [class*=":text-blue-800"] {
+  color: #93c5fd !important;
+}
+
+:root[data-theme="dark"] [class~="bg-emerald-50"],
+:root[data-theme="dark"] [class*=":bg-emerald-50"] {
+  background-color: var(--success-soft) !important;
+}
+
+:root[data-theme="dark"] [class~="bg-emerald-100"],
+:root[data-theme="dark"] [class*=":bg-emerald-100"],
+:root[data-theme="dark"] [class~="bg-emerald-200"],
+:root[data-theme="dark"] [class*=":bg-emerald-200"] {
+  background-color: color-mix(in srgb, var(--success-soft) 82%, var(--brand-soft)) !important;
+}
+
+:root[data-theme="dark"] [class~="text-emerald-950"],
+:root[data-theme="dark"] [class~="text-emerald-900"],
+:root[data-theme="dark"] [class~="text-emerald-900/75"],
+:root[data-theme="dark"] [class~="text-emerald-800"],
+:root[data-theme="dark"] [class~="text-emerald-700"],
+:root[data-theme="dark"] [class*=":text-emerald-950"],
+:root[data-theme="dark"] [class*=":text-emerald-900"],
+:root[data-theme="dark"] [class*=":text-emerald-900/75"],
+:root[data-theme="dark"] [class*=":text-emerald-800"],
+:root[data-theme="dark"] [class*=":text-emerald-700"] {
+  color: var(--success-text) !important;
+}
+
+:root[data-theme="dark"] [class~="bg-red-50"],
+:root[data-theme="dark"] [class~="bg-red-50/60"],
+:root[data-theme="dark"] [class*=":bg-red-50"],
+:root[data-theme="dark"] [class*=":bg-red-50/60"] {
+  background-color: var(--danger-soft) !important;
+}
+
+:root[data-theme="dark"] [class~="bg-red-100"],
+:root[data-theme="dark"] [class*=":bg-red-100"] {
+  background-color: color-mix(in srgb, var(--danger-soft) 85%, var(--brand-soft)) !important;
+}
+
+:root[data-theme="dark"] [class~="text-red-950"],
+:root[data-theme="dark"] [class~="text-red-900"],
+:root[data-theme="dark"] [class~="text-red-800"],
+:root[data-theme="dark"] [class~="text-red-800/70"],
+:root[data-theme="dark"] [class~="text-red-700"],
+:root[data-theme="dark"] [class~="text-red-600"],
+:root[data-theme="dark"] [class*=":text-red-950"],
+:root[data-theme="dark"] [class*=":text-red-900"],
+:root[data-theme="dark"] [class*=":text-red-800"],
+:root[data-theme="dark"] [class*=":text-red-800/70"],
+:root[data-theme="dark"] [class*=":text-red-700"],
+:root[data-theme="dark"] [class*=":text-red-600"] {
+  color: var(--danger-text) !important;
+}
+
+:root[data-theme="dark"] [class~="border-emerald-200"],
+:root[data-theme="dark"] [class*=":border-emerald-200"] {
+  border-color: color-mix(in srgb, var(--success-text) 35%, transparent) !important;
+}
+
+:root[data-theme="dark"] [class~="border-red-100"],
+:root[data-theme="dark"] [class~="border-red-200"],
+:root[data-theme="dark"] [class~="border-red-300"],
+:root[data-theme="dark"] [class*=":border-red-100"],
+:root[data-theme="dark"] [class*=":border-red-200"],
+:root[data-theme="dark"] [class*=":border-red-300"] {
+  border-color: color-mix(in srgb, var(--danger-text) 35%, transparent) !important;
+}
+
+:root[data-theme="dark"] [class~="border-amber-200"],
+:root[data-theme="dark"] [class~="border-amber-300"],
+:root[data-theme="dark"] [class*=":border-amber-200"],
+:root[data-theme="dark"] [class*=":border-amber-300"] {
+  border-color: color-mix(in srgb, var(--brand) 40%, transparent) !important;
+}
+
+:root[data-theme="dark"] [class~="border-sky-200"],
+:root[data-theme="dark"] [class~="border-violet-200"],
+:root[data-theme="dark"] [class*=":border-sky-200"],
+:root[data-theme="dark"] [class*=":border-violet-200"] {
+  border-color: var(--line) !important;
+}
+
+/* Tinted panels: the light palette uses near-white washes that glare on the
+   dark background, so they are remapped onto the semantic soft tokens. */
+:root[data-theme="dark"] [class~="bg-red-50/50"],
+:root[data-theme="dark"] [class~="bg-red-50/70"],
+:root[data-theme="dark"] [class*=":bg-red-50/50"],
+:root[data-theme="dark"] [class*=":bg-red-50/70"] {
+  background-color: color-mix(in srgb, var(--danger-soft) 70%, transparent) !important;
+}
+
+:root[data-theme="dark"] [class~="bg-amber-50/70"],
+:root[data-theme="dark"] [class*=":bg-amber-50/70"] {
+  background-color: var(--brand-softer) !important;
+}
+
+:root[data-theme="dark"] [class~="bg-violet-50"],
+:root[data-theme="dark"] [class*=":bg-violet-50"] {
+  background-color: rgba(167, 139, 250, 0.1) !important;
+}
+
+:root[data-theme="dark"] [class~="bg-orange-100"],
+:root[data-theme="dark"] [class*=":bg-orange-100"] {
+  background-color: rgba(251, 146, 60, 0.16) !important;
+}
+
+/* Mid-tone text sits below 4.5:1 on the dark surface and needs lifting. */
+:root[data-theme="dark"] [class~="text-emerald-600"],
+:root[data-theme="dark"] [class~="text-emerald-700"],
+:root[data-theme="dark"] [class*=":text-emerald-600"],
+:root[data-theme="dark"] [class*=":text-emerald-700"] {
+  color: var(--success-text) !important;
+}
+
+:root[data-theme="dark"] [class~="text-orange-800"],
+:root[data-theme="dark"] [class*=":text-orange-800"] {
+  color: #fdba74 !important;
+}
+
+:root[data-theme="dark"] [class~="text-red-900/80"],
+:root[data-theme="dark"] [class~="text-red-900/70"],
+:root[data-theme="dark"] [class*=":text-red-900/80"],
+:root[data-theme="dark"] [class*=":text-red-900/70"] {
+  color: color-mix(in srgb, var(--danger-text) 80%, var(--foreground)) !important;
+}
+
+:root[data-theme="dark"] [class~="text-amber-900/70"],
+:root[data-theme="dark"] [class*=":text-amber-900/70"] {
+  color: color-mix(in srgb, var(--brand-dark) 75%, var(--muted)) !important;
+}
+
+/* ---------------------------------------------------------------------------
+   Clerk (customer sign-in and email verification)
+
+   The provider renders its own card, inputs, and buttons. Left alone it paints
+   a light-only UI inside a themed page, so the customer screens looked broken
+   after switching to dark. These aliases point Clerk's variables at the same
+   tokens the rest of the application uses, so one theme switch moves both. The
+   values are wired up by `clerkAppearance` in lib/clerk-theme.ts.
+   --------------------------------------------------------------------------- */
+:root {
+  --clerk-surface: var(--card);
+  --clerk-surface-raised: var(--card-elevated);
+  --clerk-ink: var(--foreground);
+  --clerk-ink-muted: var(--muted);
+  --clerk-line: var(--line-strong);
+  --clerk-field: var(--input);
+  --clerk-accent: var(--brand);
+  --clerk-danger: var(--danger-text);
+  --clerk-success: var(--success-text);
+  --clerk-warning: var(--warning-text);
+  --clerk-radius: 1rem;
+}
+
+.cl-card,
+.cl-cardBox {
+  background-color: var(--clerk-surface) !important;
+  color: var(--clerk-ink) !important;
+  border: 1px solid var(--clerk-line) !important;
+  box-shadow: none !important;
+}
+
+.cl-cardHeader,
+.cl-cardContent,
+.cl-cardFooter,
+.cl-socialButtons,
+.cl-formButton,
+.cl-formHeader,
+.cl-headerTitle,
+.cl-form,
+.cl-footerAction,
+.cl-identityPreview,
+.cl-internal-devices,
+.cl-card__main {
+  color: var(--clerk-ink) !important;
+}
+
+.cl-headerTitle,
+.cl-formHeaderTitle,
+.cl-identityPreview,
+.cl-card__title,
+.cl-cardBox h1,
+.cl-cardBox h2 {
+  color: var(--clerk-ink) !important;
+  font-family: var(--font-display), serif !important;
+}
+
+.cl-subheader,
+.cl-formHeaderSubtitle,
+.cl-card__subtitle,
+.cl-footerAction__text,
+.cl-identityPreview__secondaryText,
+.cl-cardBox p {
+  color: var(--clerk-ink-muted) !important;
+}
+
+.cl-formButton,
+.cl-socialButton,
+.cl-button {
+  border-radius: 999px !important;
+  font-weight: 600 !important;
+}
+
+.cl-formButtonPrimary,
+.cl-buttonPrimary {
+  background-color: var(--clerk-accent) !important;
+  color: #1e1b16 !important;
+}
+
+.cl-formButtonPrimary:hover,
+.cl-buttonPrimary:hover {
+  filter: brightness(1.06) !important;
+}
+
+.cl-formButton__text,
+.cl-button__text,
+.cl-socialButton__icon {
+  color: #1e1b16 !important;
+}
+
+.cl-formButtonSecondary,
+.cl-buttonSecondary {
+  background-color: var(--clerk-surface-raised) !important;
+  color: var(--clerk-ink) !important;
+  border: 1px solid var(--clerk-line) !important;
+}
+
+/* The social row is styled like any other secondary control, never hidden: the
+   customer sign-in depends on the Google option. */
+.cl-socialButtons {
+  gap: 0.5rem !important;
+}
+
+.cl-socialButton,
+.cl-socialButton:hover {
+  background-color: var(--clerk-surface-raised) !important;
+  color: var(--clerk-ink) !important;
+  border: 1px solid var(--clerk-line) !important;
+  box-shadow: none !important;
+}
+
+.cl-socialButton:hover {
+  background-color: color-mix(in srgb, var(--clerk-ink) 6%, var(--clerk-surface-raised)) !important;
+}
+
+.cl-socialButton__text,
+.cl-socialButton__icon {
+  color: var(--clerk-ink) !important;
+}
+
+.cl-socialIcon {
+  color: var(--clerk-ink) !important;
+}
+
+.cl-input,
+.cl-inputField,
+.cl-textInput,
+.cl-formInputText {
+  background-color: var(--clerk-field) !important;
+  color: var(--clerk-ink) !important;
+  border: 1px solid var(--clerk-line) !important;
+  border-radius: 0.75rem !important;
+}
+
+.cl-input:focus,
+.cl-inputField:focus,
+.cl-formInputText:focus {
+  border-color: var(--clerk-accent) !important;
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--clerk-accent) 22%, transparent) !important;
+}
+
+.cl-input::placeholder,
+.cl-formInputText::placeholder {
+  color: var(--clerk-ink-muted) !important;
+  opacity: 1 !important;
+}
+
+.cl-label,
+.cl-formLabel,
+.cl-formHeaderText {
+  color: var(--clerk-ink) !important;
+}
+
+.cl-error,
+.cl-formErrorText,
+.cl-alert {
+  color: var(--clerk-danger) !important;
+}
+
+.cl-success,
+.cl-successBox {
+  color: var(--clerk-success) !important;
+}
+
+.cl-internalLink,
+.cl-footerActionLink,
+.cl-formLink {
+  color: var(--clerk-accent) !important;
+  font-weight: 600 !important;
+}
+
+.cl-otpInput,
+.cl-otpInputField {
+  color: var(--clerk-ink) !important;
+}
+
+.cl-rootBox,
+.cl-rootBox__body {
+  color: var(--clerk-ink) !important;
+}
+
+.cl-badge,
+.cl-avatarImage,
+.cl-userButtonPopoverCard {
+  color: var(--clerk-ink) !important;
+}
+
+@media (max-width: 640px) {
+  .container-shell {
+    width: min(100% - 1.25rem, 1200px);
+  }
+
+  table {
+    min-width: 42rem;
+  }
+
+  details > div {
+    max-width: calc(100vw - 1.5rem);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    scroll-behavior: auto !important;
+    transition-duration: 0.01ms !important;
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+  }
+}

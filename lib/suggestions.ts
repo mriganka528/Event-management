@@ -1,0 +1,76 @@
+export const INVENTORY_NAME_SUGGESTIONS = [
+  "Banquet chair",
+  "VIP chair",
+  "Round table",
+  "Rectangular table",
+  "Stage platform",
+  "Dance floor",
+  "LED panel",
+  "Moving head light",
+  "Speaker",
+  "Audio mixer",
+  "Wireless microphone",
+  "Stage truss",
+  "Floral backdrop",
+  "Balloon decoration",
+  "Buffet counter",
+  "Dining table",
+  "Beverage station",
+  "Photo booth",
+  "Generator",
+  "Umbrella stand",
+] as const;
+
+export const SERVICE_NAME_SUGGESTIONS = [
+  "Event planning",
+  "Tent setup",
+  "Event decoration",
+  "Floral design",
+  "Catering",
+  "Stage and lighting",
+  "DJ and sound",
+  "Live band",
+  "Photography",
+  "Videography",
+  "Drone photography",
+  "MC and hosting",
+  "Seating and tables",
+  "Transportation",
+  "Event security",
+  "Custom theme",
+] as const;
+
+export const UNIT_LABEL_SUGGESTIONS = [
+  "setup",
+  "item",
+  "unit",
+  "service",
+  "day",
+  "hour",
+  "guest",
+  "plate",
+  "trip",
+] as const;
+
+export const PACKAGE_NAME_SUGGESTIONS = [
+  "Essential Celebration",
+  "Signature Wedding",
+  "Premium Wedding",
+  "Birthday Sparkle",
+  "Corporate Launch",
+  "Private Party",
+  "Intimate Gathering",
+  "Full-Service Event",
+] as const;
+
+export const EVENT_LOCATION_SUGGESTIONS = [
+  "Banquet hall",
+  "Wedding venue",
+  "Hotel ballroom",
+  "Farmhouse",
+  "Garden venue",
+  "Home",
+  "Office",
+  "Outdoor venue",
+  "Community hall",
+] as const;

@@ -1,0 +1,658 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum RoleKey {
+  SUPER_ADMIN
+  ADMIN
+  STAFF
+  CUSTOMER
+}
+
+enum BookingStatus {
+  PENDING
+  APPROVED
+  PREPARING
+  COMPLETED
+  CANCELLED
+  REJECTED
+}
+
+enum EventType {
+  WEDDING
+  BIRTHDAY
+  CORPORATE
+  PARTY
+  OTHER
+}
+
+enum StaffType {
+  DECORATOR
+  TENT_INSTALLER
+  ELECTRICIAN
+  DRIVER
+}
+
+enum StaffStatus {
+  PENDING
+  ACTIVE
+  SUSPENDED
+}
+
+enum PaymentStage {
+  ADVANCE
+  FINAL
+}
+
+enum PaymentMethod {
+  UPI
+  CARD
+  NETBANKING
+  CASH
+}
+
+enum PaymentProvider {
+  MANUAL
+  RAZORPAY
+}
+
+enum PaymentStatus {
+  PENDING
+  CAPTURED
+  FAILED
+  REFUNDED
+}
+
+enum PaymentOrderStatus {
+  CREATED
+  PAID
+  FAILED
+  EXPIRED
+  RECONCILIATION_REQUIRED
+}
+
+enum PricingMode {
+  FIXED
+  PER_GUEST
+}
+
+enum NotificationAudience {
+  ADMIN
+  CUSTOMER
+}
+
+enum NotificationType {
+  BOOKING_APPROVED
+  BOOKING_REJECTED
+  PAYMENT_RECEIVED
+  EVENT_REMINDER
+  NEW_BOOKING_REQUEST
+  LOW_INVENTORY
+  UPCOMING_EVENT
+  STAFF_INVITE
+  STAFF_REQUEST
+  STAFF_ACTIVATED
+}
+
+enum InventoryCategory {
+  TENT
+  CHAIR
+  TABLE
+  LIGHT
+  STAGE_EQUIPMENT
+  SOUND_SYSTEM
+  DECORATION
+  CATERING
+  PHOTOGRAPHY
+}
+
+enum AdminRequestStatus {
+  PENDING
+  APPROVED
+  REJECTED
+}
+
+/// Lifecycle gate for every local account. A password alone never grants
+/// application access: a team account is PENDING_APPROVAL until a super admin
+/// approves it, and SUSPENDED/REJECTED accounts are denied immediately.
+/// Customer self-registration is created ACTIVE because a customer may only ever
+/// see their own bookings, never operational data.
+enum AccountStatus {
+  PENDING_APPROVAL
+  ACTIVE
+  REJECTED
+  SUSPENDED
+}
+
+enum SecurityEventType {
+  SIGN_IN_SUCCEEDED
+  SIGN_IN_BLOCKED
+  SIGN_OUT
+  ACCESS_REQUEST_SUBMITTED
+  ACCESS_REQUEST_APPROVED
+  ACCESS_REQUEST_REJECTED
+  ACCOUNT_APPROVED
+  ACCOUNT_REJECTED
+  ACCOUNT_SUSPENDED
+  ACCOUNT_REACTIVATED
+  ROLE_CHANGED
+  TWO_FACTOR_VERIFIED
+  TWO_FACTOR_FAILED
+  PASSWORD_CHANGED
+  PASSWORD_RESET_REQUESTED
+  /// A signed-in user tried to change their own email or password and could not
+  /// re-confirm the current password. A rising count suggests an unlocked session
+  /// that is not the account owner.
+  CREDENTIAL_CHANGE_BLOCKED
+  /// A new address was confirmed by a code sent to that address.
+  EMAIL_CHANGED
+  STAFF_INVITED
+  DEVICE_SESSION_CREATED
+  DEVICE_SESSION_REVOKED
+  DEVICE_LIMIT_REACHED
+  BLOCKED_ROUTE_ATTEMPT
+}
+
+/// Where a one-time code is delivered.
+enum OtpChannel {
+  EMAIL
+  PHONE
+}
+
+enum OtpPurpose {
+  /// Second factor required before a privileged session is issued.
+  TWO_FACTOR
+  /// Confirms an unverified email address during sign-up or change.
+  EMAIL_VERIFY
+  /// Confirms control of a phone number before it can be used for 2FA.
+  PHONE_VERIFY
+  /// Password-reset link/code.
+  PASSWORD_RESET
+}
+
+enum SessionStatus {
+  ACTIVE
+  REVOKED
+}
+
+model Role {
+  id          String   @id @default(cuid())
+  key         RoleKey  @unique
+  name        String
+  description String?
+  users       User[]
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+}
+
+model User {
+  id                    String               @id @default(cuid())
+  email                 String               @unique
+  /// Set only for customers who sign in through Clerk (Google or email). Unique so
+  /// one Clerk identity can never be linked to two local accounts, and NULL for
+  /// every team account, which must keep using a password and a one-time code.
+  clerkId               String?              @unique
+  emailVerifiedAt       DateTime?
+  phone                 String?
+  phoneVerifiedAt       DateTime?
+  /// bcrypt hash. NULL means the account cannot sign in yet and must complete an
+  /// activation flow (team accounts created by an admin or from a request).
+  passwordHash          String?
+  /// Set when an activation token was issued; cleared once a password is set.
+  mustSetPassword       Boolean              @default(false)
+  passwordChangedAt     DateTime?
+  /// Admin/super admin accounts MUST have this set before a session is issued.
+  twoFactorChannel      OtpChannel?
+  twoFactorEnabledAt    DateTime?
+  firstName             String
+  lastName              String?
+  avatarUrl             String?
+  isActive              Boolean              @default(true)
+  accountStatus         AccountStatus        @default(PENDING_APPROVAL)
+  approvedAt            DateTime?
+  approvedById          String?
+  approvedBy            User?                @relation("UserApprover", fields: [approvedById], references: [id], onDelete: SetNull)
+  approvers             User[]               @relation("UserApprover")
+  suspendedAt           DateTime?
+  suspensionReason      String?
+  lastLoginAt           DateTime?
+  lastLoginIp           String?
+  signInCount           Int                  @default(0)
+  failedSignInCount     Int                  @default(0)
+  roleId                String
+  role                  Role                 @relation(fields: [roleId], references: [id], onDelete: Restrict)
+  customerProfile       Customer?
+  adminProfile          Admin?
+  staffProfile          Staff?
+  notifications         Notification[]
+  adminRequests         AdminAccessRequest[] @relation("AdminRequestRequester")
+  reviewedAdminRequests AdminAccessRequest[] @relation("AdminRequestReviewer")
+  securityEvents        SecurityEvent[]
+  sessions              AuthSession[]
+  otpChallenges         OtpChallenge[]
+  activationTokens      ActivationToken[]
+  createdAt             DateTime             @default(now())
+  updatedAt             DateTime             @updatedAt
+
+  @@index([accountStatus, createdAt])
+  @@index([roleId])
+}
+
+/// One row per signed-in device. The application refuses to issue a session when
+/// an account already has MAX_DEVICES_PER_ACCOUNT active rows, so a stolen
+/// credential cannot be used to spread access across unlimited machines.
+model AuthSession {
+  id            String        @id @default(cuid())
+  userId        String
+  user          User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+  /// SHA-256 of the opaque cookie token. The raw token is never stored.
+  tokenHash     String        @unique
+  /// Stable per-browser identifier, so re-authenticating on the same device
+  /// updates one row instead of consuming a new slot.
+  deviceId      String
+  deviceLabel   String?
+  ipAddress     String?
+  userAgent     String?
+  status        SessionStatus @default(ACTIVE)
+  twoFactorUsed OtpChannel?
+  lastSeenAt    DateTime      @default(now())
+  createdAt     DateTime      @default(now())
+  revokedAt     DateTime?
+  revokedReason String?
+
+  @@index([userId, status])
+  @@index([deviceId])
+  @@index([status, lastSeenAt])
+}
+
+/// A single-use numeric code. Only a hash is stored, and the row is burned on
+/// the first successful verification.
+model OtpChallenge {
+  id          String     @id @default(cuid())
+  userId      String?
+  user        User?      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  purpose     OtpPurpose
+  channel     OtpChannel
+  /// Normalised destination: lowercase email or E.164-ish phone.
+  destination String
+  codeHash    String
+  attempts    Int        @default(0)
+  maxAttempts Int        @default(5)
+  /// Consumed by the step that created it (a half-finished sign-in), so a code
+  /// cannot be replayed against a different session.
+  boundSessionId String?
+  consumedAt  DateTime?
+  expiresAt   DateTime
+  createdAt   DateTime   @default(now())
+
+  @@index([userId, purpose])
+  @@index([destination, purpose])
+  @@index([expiresAt])
+}
+
+/// One-time link token that lets a new team member set their own password.
+/// Single use, expiring, and invalidated the moment it is redeemed.
+model ActivationToken {
+  id        String    @id @default(cuid())
+  userId    String
+  user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  tokenHash String    @unique
+  expiresAt DateTime
+  usedAt    DateTime?
+  createdAt DateTime  @default(now())
+
+  @@index([userId])
+  @@index([expiresAt])
+}
+
+/// Append-only throttle ledger for sign-in and OTP attempts, used for
+/// lockouts and for the "too many attempts" messaging.
+model LoginAttempt {
+  id         String   @id @default(cuid())
+  identifier String
+  ipAddress  String?
+  successful Boolean  @default(false)
+  createdAt  DateTime @default(now())
+
+  @@index([identifier, createdAt])
+  @@index([ipAddress, createdAt])
+}
+
+/// A request to join the team. `requesterId` is NULL for the public
+/// "Join the team" form: anyone may apply without having an account, which is
+/// why the contact details are denormalised onto the row.
+model AdminAccessRequest {
+  id            String             @id @default(cuid())
+  requesterId   String?
+  requester     User?              @relation("AdminRequestRequester", fields: [requesterId], references: [id], onDelete: Cascade)
+  email         String
+  fullName      String
+  phone         String?
+  reviewedById  String?
+  reviewedBy    User?              @relation("AdminRequestReviewer", fields: [reviewedById], references: [id], onDelete: SetNull)
+  requestedRole RoleKey            @default(ADMIN)
+  staffType     StaffType?
+  status        AdminRequestStatus @default(PENDING)
+  note          String?
+  reviewNote    String?
+  /// Set when the decision created a real account from this request.
+  userId        String?
+  reviewedAt    DateTime?
+  createdAt     DateTime           @default(now())
+  updatedAt     DateTime           @updatedAt
+
+  @@index([status, createdAt])
+  @@index([requesterId, status])
+  @@index([email])
+}
+
+/// Append-only audit trail for authentication, approval, and privilege events.
+/// Rows are never updated or deleted by application code.
+model SecurityEvent {
+  id        String            @id @default(cuid())
+  type      SecurityEventType
+  userId    String?
+  user      User?             @relation(fields: [userId], references: [id], onDelete: SetNull)
+  email     String?
+  ipAddress String?
+  userAgent String?
+  detail    String?
+  createdAt DateTime          @default(now())
+
+  @@index([type, createdAt])
+  @@index([userId, createdAt])
+}
+
+/// A customer record is the owner of booking history, so it is kept even when
+/// the login behind it is removed. The wipe script anonymises such users rather
+/// than deleting them, which preserves every booking, invoice, and payment.
+model Customer {
+  id        String    @id @default(cuid())
+  userId    String    @unique
+  user      User      @relation(fields: [userId], references: [id], onDelete: Restrict)
+  address   String?
+  bookings  Booking[]
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+}
+
+model Admin {
+  id           String   @id @default(cuid())
+  userId       String   @unique
+  user         User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  managedStaff Staff[]  @relation("AdminAssignedStaff")
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+}
+
+model Staff {
+  id              String         @id @default(cuid())
+  userId          String         @unique
+  user            User           @relation(fields: [userId], references: [id], onDelete: Cascade)
+  staffType       StaffType
+  status          StaffStatus    @default(PENDING)
+  isAvailable     Boolean        @default(true)
+  adminId         String?
+  managedBy       Admin?         @relation("AdminAssignedStaff", fields: [adminId], references: [id], onDelete: SetNull)
+  inviteToken     String?        @unique
+  inviteExpiresAt DateTime?
+  invitedAt       DateTime?
+  activatedAt     DateTime?
+  assignments     BookingStaff[]
+  createdAt       DateTime       @default(now())
+  updatedAt       DateTime       @updatedAt
+
+  @@index([status])
+  @@index([staffType, status])
+}
+
+model Service {
+  id                String             @id @default(cuid())
+  name              String             @unique
+  slug              String             @unique
+  description       String?
+  basePrice         Decimal            @db.Decimal(10, 2)
+  unitLabel         String             @default("unit")
+  pricingMode       PricingMode        @default(FIXED)
+  inventoryCategory InventoryCategory?
+  imageUrl          String?
+  imagePublicId     String?
+  isActive          Boolean            @default(true)
+  packageServices   PackageService[]
+  bookingServices   BookingService[]
+  createdAt         DateTime           @default(now())
+  updatedAt         DateTime           @updatedAt
+
+  @@index([isActive, name])
+}
+
+model Package {
+  id              String           @id @default(cuid())
+  name            String           @unique
+  slug            String           @unique
+  description     String
+  price           Decimal          @db.Decimal(10, 2)
+  imageUrl        String?
+  imagePublicId   String?
+  isActive        Boolean          @default(true)
+  packageServices PackageService[]
+  bookings        Booking[]
+  createdAt       DateTime         @default(now())
+  updatedAt       DateTime         @updatedAt
+
+  @@index([isActive, price])
+}
+
+model PackageService {
+  packageId String
+  serviceId String
+  quantity  Int     @default(1)
+  package   Package @relation(fields: [packageId], references: [id], onDelete: Cascade)
+  service   Service @relation(fields: [serviceId], references: [id], onDelete: Cascade)
+
+  @@id([packageId, serviceId])
+}
+
+model Booking {
+  id                      String             @id @default(cuid())
+  customerId              String
+  customer                Customer           @relation(fields: [customerId], references: [id], onDelete: Cascade)
+  packageId               String?
+  package                 Package?           @relation(fields: [packageId], references: [id], onDelete: SetNull)
+  packageNameSnapshot     String?
+  packageServicesSnapshot Json?
+  eventType               EventType
+  eventDate               DateTime
+  location                String
+  guestCount              Int
+  notes                   String?
+  status                  BookingStatus      @default(PENDING)
+  subtotal                Decimal            @db.Decimal(10, 2)
+  taxAmount               Decimal            @db.Decimal(10, 2)
+  totalAmount             Decimal            @db.Decimal(10, 2)
+  paidAmount              Decimal            @default(0) @db.Decimal(10, 2)
+  balanceAmount           Decimal            @db.Decimal(10, 2)
+  reservedPaymentAmount   Decimal            @default(0) @db.Decimal(10, 2)
+  idempotencyKey          String?            @unique
+  idempotencyHash         String?
+  publicToken             String?            @unique
+  publicTokenExpiresAt    DateTime?
+  bookingServices         BookingService[]
+  bookingInventory        BookingInventory[]
+  bookingStaff            BookingStaff[]
+  payments                Payment[]
+  paymentOrders           PaymentOrder[]
+  invoice                 Invoice?
+  event                   Event?
+  createdAt               DateTime           @default(now())
+  updatedAt               DateTime           @updatedAt
+
+  @@index([status, eventDate])
+  @@index([customerId, createdAt])
+  @@index([createdAt])
+}
+
+model BookingService {
+  id         String  @id @default(cuid())
+  bookingId  String
+  serviceId  String
+  quantity   Int     @default(1)
+  unitPrice  Decimal @db.Decimal(10, 2)
+  totalPrice Decimal @db.Decimal(10, 2)
+  booking    Booking @relation(fields: [bookingId], references: [id], onDelete: Cascade)
+  service    Service @relation(fields: [serviceId], references: [id], onDelete: Restrict)
+}
+
+model Inventory {
+  id                String             @id @default(cuid())
+  name              String             @unique
+  slug              String             @unique
+  category          InventoryCategory
+  totalQuantity     Int
+  bookedQuantity    Int                @default(0)
+  availableQuantity Int
+  reorderLevel      Int                @default(5)
+  imageUrl          String?
+  imagePublicId     String?
+  isActive          Boolean            @default(true)
+  bookingInventory  BookingInventory[]
+  createdAt         DateTime           @default(now())
+  updatedAt         DateTime           @updatedAt
+
+  @@index([availableQuantity])
+  @@index([category, isActive])
+}
+
+model BookingInventory {
+  id          String    @id @default(cuid())
+  bookingId   String
+  inventoryId String
+  quantity    Int
+  booking     Booking   @relation(fields: [bookingId], references: [id], onDelete: Cascade)
+  inventory   Inventory @relation(fields: [inventoryId], references: [id], onDelete: Restrict)
+
+  @@unique([bookingId, inventoryId])
+}
+
+model Event {
+  id        String   @id @default(cuid())
+  bookingId String   @unique
+  booking   Booking  @relation(fields: [bookingId], references: [id], onDelete: Cascade)
+  title     String
+  startDate DateTime
+  endDate   DateTime
+  location  String
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+model BookingStaff {
+  id         String   @id @default(cuid())
+  bookingId  String
+  staffId    String
+  assignedAt DateTime @default(now())
+  booking    Booking  @relation(fields: [bookingId], references: [id], onDelete: Cascade)
+  staff      Staff    @relation(fields: [staffId], references: [id], onDelete: Cascade)
+
+  @@unique([bookingId, staffId])
+}
+
+model Payment {
+  id                String          @id @default(cuid())
+  bookingId         String
+  booking           Booking         @relation(fields: [bookingId], references: [id], onDelete: Cascade)
+  amount            Decimal         @db.Decimal(10, 2)
+  stage             PaymentStage
+  method            PaymentMethod
+  provider          PaymentProvider @default(MANUAL)
+  status            PaymentStatus   @default(CAPTURED)
+  reference         String?
+  providerOrderId   String?
+  paymentOrderId    String?         @unique
+  paymentOrder      PaymentOrder?   @relation(fields: [paymentOrderId], references: [id], onDelete: SetNull)
+  providerPaymentId String?         @unique
+  providerSignature String?
+  idempotencyKey    String?         @unique
+  paidAt            DateTime        @default(now())
+  createdAt         DateTime        @default(now())
+}
+
+model PaymentOrder {
+  id                String             @id @default(cuid())
+  bookingId         String
+  booking           Booking            @relation(fields: [bookingId], references: [id], onDelete: Cascade)
+  provider          PaymentProvider    @default(RAZORPAY)
+  providerOrderId   String?            @unique
+  amount            Decimal            @db.Decimal(10, 2)
+  currency          String             @default("INR")
+  status            PaymentOrderStatus @default(CREATED)
+  idempotencyKey    String             @unique
+  providerPaymentId String?
+  providerSignature String?
+  expiresAt         DateTime
+  paidAt            DateTime?
+  payment           Payment?
+  createdAt         DateTime           @default(now())
+  updatedAt         DateTime           @updatedAt
+
+  @@index([bookingId, status])
+  @@index([providerOrderId, status])
+}
+
+model PaymentWebhookEvent {
+  id                String    @id @default(cuid())
+  providerEventId   String    @unique
+  eventType         String
+  providerOrderId   String?
+  providerPaymentId String?
+  payloadHash       String
+  status            String    @default("RECEIVED")
+  error             String?
+  receivedAt        DateTime  @default(now())
+  processedAt       DateTime?
+}
+
+model Invoice {
+  id            String   @id @default(cuid())
+  bookingId     String   @unique
+  booking       Booking  @relation(fields: [bookingId], references: [id], onDelete: Cascade)
+  invoiceNumber String   @unique
+  taxRate       Decimal  @default(0.18) @db.Decimal(4, 2)
+  totalAmount   Decimal  @db.Decimal(10, 2)
+  paidAmount    Decimal  @db.Decimal(10, 2)
+  balanceAmount Decimal  @db.Decimal(10, 2)
+  issuedAt      DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+}
+
+model Notification {
+  id        String               @id @default(cuid())
+  userId    String
+  user      User                 @relation(fields: [userId], references: [id], onDelete: Cascade)
+  audience  NotificationAudience
+  type      NotificationType
+  title     String
+  message   String
+  read      Boolean              @default(false)
+  createdAt DateTime             @default(now())
+
+  @@index([userId, audience, read, createdAt])
+}
+
+model BusinessSetting {
+  id           String   @id @default("default")
+  businessName String   @default("")
+  email        String   @default("")
+  phone        String   @default("")
+  address      String   @default("")
+  city         String   @default("")
+  taxRate      Decimal  @default(0.18) @db.Decimal(4, 2)
+  currency     String   @default("INR")
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+}

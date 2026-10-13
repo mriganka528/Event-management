@@ -1,10 +1,12 @@
 import type { Metadata } from "next";
 import Link from "next/link";
+import { redirect } from "next/navigation";
 import { AlertTriangle, UserCheck } from "lucide-react";
 import { ActivateForm } from "@/components/auth/activate-form";
 import { ThemeToggle } from "@/components/marketing/theme-toggle";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
+import { getAuthContext } from "@/lib/auth/server";
 import { inspectActivationToken } from "@/lib/auth/team";
 
 export const dynamic = "force-dynamic";
@@ -16,7 +18,15 @@ export const metadata: Metadata = {
 export default async function ActivatePage({ searchParams }: { searchParams: Promise<{ token?: string }> }) {
   const query = await searchParams;
   const token = typeof query.token === "string" ? query.token : "";
-  const result = await inspectActivationToken(token);
+
+  // A signed-in account that owes a password belongs on the reset screen. Both
+  // routes are reachable from `mustSetPassword`, and a member arriving from a
+  // verified reset code has no activation link to redeem, so sending them here
+  // would only show "this link cannot be used".
+  const context = await getAuthContext();
+  if (token === "" && context.user?.mustSetPassword) redirect("/reset-password");
+
+  const result = token ? await inspectActivationToken(token) : null;
 
   return (
     <main className="flex min-h-screen items-center justify-center px-4 py-12">
@@ -26,7 +36,25 @@ export default async function ActivatePage({ searchParams }: { searchParams: Pro
           <ThemeToggle />
         </div>
 
-        {!result.ok ? (
+        {!result ? (
+          <Card>
+            <CardHeader>
+              <CardTitle className="flex items-center gap-2 text-xl">
+                <AlertTriangle className="h-5 w-5 text-[var(--warning-text)]" />
+                This link cannot be used
+              </CardTitle>
+              <CardDescription>No activation token was supplied. Open the link from your invitation email, or request a new one.</CardDescription>
+            </CardHeader>
+            <CardContent className="grid gap-3">
+              <Link href="/join-the-team">
+                <Button className="w-full">Request a new invitation</Button>
+              </Link>
+              <Link href="/sign-in">
+                <Button variant="outline" className="w-full">Back to sign in</Button>
+              </Link>
+            </CardContent>
+          </Card>
+        ) : !result.ok ? (
           <Card>
             <CardHeader>
               <CardTitle className="flex items-center gap-2 text-xl">

@@ -1,6 +1,9 @@
-import { AccountStatus, BookingStatus, NotificationAudience, type SecurityEventType } from "@prisma/client";
+import { AccountStatus, BookingStatus, NotificationAudience, RoleKey, type SecurityEventType } from "@prisma/client";
 import { prisma } from "@/lib/prisma";
 import { requireAdmin, requireSuperAdmin } from "@/lib/rbac";
+
+/** The roles the access-control screen is about. */
+const ADMIN_ROLE_KEYS = [RoleKey.SUPER_ADMIN, RoleKey.ADMIN];
 
 export async function getAdminDashboardData() {
   await requireAdmin();
@@ -207,11 +210,26 @@ export async function getAdminNotifications(userId: string) {
   }
 }
 
+/**
+ * Accounts that hold — or are waiting to hold — an administrator role.
+ *
+ * Staff and customers are deliberately excluded from this list. `/admin/staff`
+ * and `/admin/customers` already own those records, and duplicating every
+ * customer account here made the access-control screen unusable and let a
+ * super admin change a customer's role from the wrong page.
+ *
+ * Filtered in the query rather than in the component so the counts in the
+ * header and the rows in the table are guaranteed to describe the same set.
+ */
 export async function getAdminUsers() {
   await requireAdmin();
   try {
+    // Role ids are resolved by key, not hard-coded, so a seeded database and a
+    // migrated one behave the same.
+    const adminRoles = await prisma.role.findMany({ where: { key: { in: ADMIN_ROLE_KEYS } }, select: { id: true } });
     const [users, requests] = await Promise.all([
       prisma.user.findMany({
+        where: { roleId: { in: adminRoles.map((role) => role.id) } },
         include: {
           role: true,
           adminProfile: true,

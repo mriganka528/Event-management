@@ -44,7 +44,14 @@ export type SignInErrorCode =
   | "MFA_SETUP_REQUIRED"
   | "DEVICE_LIMIT_REACHED"
   | "EMAIL_UNVERIFIED"
-  | "NO_PASSWORD";
+  | "NO_PASSWORD"
+  /// The password was accepted but the code could not be delivered, or too many
+  /// codes were requested recently. Reported separately from bad credentials:
+  /// telling somebody who has just typed the *correct* password that it is wrong
+  /// sends them round in a circle resetting a password that was never the
+  /// problem.
+  | "CODE_NOT_SENT"
+  | "CODE_RATE_LIMITED";
 
 function friendlyMessage(code: SignInErrorCode): string {
   switch (code) {
@@ -70,6 +77,10 @@ function friendlyMessage(code: SignInErrorCode): string {
       return "Verify your email address before signing in.";
     case "NO_PASSWORD":
       return "Finish activating your account from the link in your email.";
+    case "CODE_NOT_SENT":
+      return "Your password was correct, but the sign-in code could not be sent. Try again in a minute.";
+    case "CODE_RATE_LIMITED":
+      return "Too many codes have been requested for this account. Wait an hour before asking for another.";
   }
 }
 
@@ -171,7 +182,11 @@ export async function beginSignIn(input: {
   if (!issued.ok) {
     // No code was sent, so there is no half-finished sign-in to resume.
     await clearPendingTwoFactor();
-    return fail("INVALID_CREDENTIALS", issued.code === "RATE_LIMITED" ? 429 : 503);
+    // Distinct from a rejected password: the credentials were accepted, so
+    // saying otherwise would send the user back to check a password that was
+    // never wrong.
+    if (issued.code === "RATE_LIMITED") return fail("CODE_RATE_LIMITED", 429);
+    return fail("CODE_NOT_SENT", 503);
   }
 
   await prisma.user.update({ where: { id: account.id }, data: { failedSignInCount: 0 } }).catch(() => undefined);

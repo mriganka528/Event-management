@@ -11,6 +11,26 @@ import type { NotificationView } from "@/lib/notification-links";
 
 const BROWSER_KEY = "staff-browser-notifications";
 
+/**
+ * The live-connection indicator, as three distinct states rather than a boolean.
+ *
+ * A boolean collapses "still trying" and "refused" into one word, and the previous
+ * version printed "Connecting" for both. A handshake the server rejects never
+ * resolves, so a broken connection looked permanently in progress instead of
+ * looking broken, and there was nothing on screen to act on.
+ */
+type LiveState = {
+  status: "connecting" | "live" | "offline";
+  /** Why it is not live, when the server or the network said so. */
+  reason?: string;
+};
+
+const LIVE_LABEL: Record<LiveState["status"], string> = {
+  connecting: "Connecting",
+  live: "Live",
+  offline: "Offline",
+};
+
 function relativeTime(iso: string) {
   const diff = Date.now() - new Date(iso).getTime();
   const minutes = Math.round(diff / 60000);
@@ -26,7 +46,9 @@ export function AdminNotificationCenter({ initialItems, initialUnread }: { initi
   const [items, setItems] = useState(initialItems);
   const [unread, setUnread] = useState(initialUnread);
   const [open, setOpen] = useState(false);
-  const [connected, setConnected] = useState(false);
+  // "Connecting" until the first answer arrives, so the initial render is honest
+  // about what is happening rather than claiming a connection that is not there yet.
+  const [live, setLive] = useState<LiveState>({ status: "connecting" });
   const [permission, setPermission] = useState<NotificationPermission | "unsupported">("default");
   const [, startTransition] = useTransition();
   const refreshTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -78,9 +100,18 @@ export function AdminNotificationCenter({ initialItems, initialUnread }: { initi
       const { io } = await import("socket.io-client");
       if (disposed) return;
       socket = io({ path: "/api/socket.io", withCredentials: true, transports: ["websocket", "polling"] });
-      socket.on("connect", () => setConnected(true));
-      socket.on("disconnect", () => setConnected(false));
-      socket.on("connect_error", () => setConnected(false));
+      socket.on("connect", () => setLive({ status: "live" }));
+      socket.on("disconnect", (reason: string) =>
+        setLive({
+          status: "offline",
+          reason: reason === "io server disconnect" ? "The server closed the connection." : undefined,
+        }),
+      );
+      socket.on("connect_error", (error: Error) => {
+        // Surfaced in the tooltip. A refused handshake says why here, which is the
+        // difference between a network problem and a session that has expired.
+        setLive({ status: "offline", reason: error?.message });
+      });
       socket.on("realtime:event", (event: { type?: string; notification?: NotificationView }) => {
         const incoming = event?.notification;
         if (incoming) {
@@ -151,11 +182,21 @@ export function AdminNotificationCenter({ initialItems, initialUnread }: { initi
     <div className="flex items-center gap-2">
       <span
         className="hidden items-center gap-2 rounded-full border border-[var(--line)] bg-[var(--card)] px-3 py-2 text-xs text-[var(--muted)] sm:inline-flex"
-        title={connected ? "Live updates connected" : "Live updates reconnecting"}
+        title={
+          live.status === "live"
+            ? "Live updates connected"
+            : live.status === "connecting"
+              ? "Opening the live updates connection"
+              : `Live updates unavailable${live.reason ? `: ${live.reason}` : ""}. The page still refreshes every minute.`
+        }
         aria-live="polite"
       >
-        {connected ? <Radio className="h-3.5 w-3.5 text-emerald-600" /> : <WifiOff className="h-3.5 w-3.5 text-amber-600" />}
-        {connected ? "Live" : "Connecting"}
+        {live.status === "live" ? (
+          <Radio className="h-3.5 w-3.5 text-emerald-600" aria-hidden="true" />
+        ) : (
+          <WifiOff className={`h-3.5 w-3.5 ${live.status === "connecting" ? "text-amber-600" : "text-red-600"}`} aria-hidden="true" />
+        )}
+        {LIVE_LABEL[live.status]}
       </span>
 
       {permission === "default" ? (

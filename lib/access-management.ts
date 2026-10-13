@@ -4,7 +4,7 @@ import { AccountStatus, RoleKey, StaffStatus, StaffType } from "@prisma/client";
 import { prisma } from "@/lib/prisma";
 import { recordSecurityEvent } from "@/lib/security-audit";
 import { revokeAllSessions } from "@/lib/auth/session";
-import { canGrantRole, canModifyAccount, isAdminRole } from "@/lib/access-policy";
+import { canGrantRole, canModifyAccount, canRemoveAdmin, isAdminRole } from "@/lib/access-policy";
 import { withSerializableRetry } from "@/lib/transactions";
 
 /**
@@ -145,6 +145,17 @@ export async function changeUserRole(input: { reviewer: { id: string; role: Role
     const next = await tx.role.findUniqueOrThrow({ where: { key: input.nextRole } });
     await tx.user.update({ where: { id: target.id }, data: { roleId: next.id } });
 
+    // Demoting away from an administrator role must delete the `Admin` row.
+    // Leaving it behind produced an account that was a staff member in
+    // `User.role` while still owning an `Admin` profile, which then blocked
+    // `removeStaffAction` with "this person is also an administrator" for
+    // somebody who no longer was one. `Admin` holds no data of its own beyond
+    // `managedStaff`, and that relation is `onDelete: SetNull`, so deleting the
+    // row only unlinks staff this person was supervising — it destroys nothing.
+    if (!isAdminRole(input.nextRole)) {
+      await tx.admin.deleteMany({ where: { userId: target.id } });
+    }
+
     if (input.nextRole === RoleKey.STAFF) {
       const staffType = input.staffType ?? StaffType.DECORATOR;
       await tx.staff.upsert({
@@ -153,6 +164,9 @@ export async function changeUserRole(input: { reviewer: { id: string; role: Role
         create: { userId: target.id, staffType, status: target.isActive ? StaffStatus.ACTIVE : StaffStatus.PENDING, activatedAt: target.isActive ? new Date() : null },
       });
     }
+    // A `Staff` row is deliberately *not* deleted when promoting to admin: it
+    // owns `BookingStaff` assignments, and dropping it would cascade away real
+    // event history. Someone may legitimately be both.
     if (isAdminRole(input.nextRole)) {
       await tx.admin.upsert({ where: { userId: target.id }, update: {}, create: { userId: target.id } });
     }
@@ -174,4 +188,72 @@ export async function changeUserRole(input: { reviewer: { id: string; role: Role
 export async function setAccountActive(input: { reviewer: { id: string; role: RoleKey }; userId: string; isActive: boolean; ipAddress?: string | null }) {
   if (input.userId === input.reviewer.id) throw new AccessManagementError("You cannot change your own access.");
   return input.isActive ? reactivateAccount(input) : suspendAccount(input);
+}
+
+/**
+ * Revokes administrator access without destroying the person.
+ *
+ * Suspending an admin only blocks sign-in, and the privilege itself stays on the
+ * record, so it can be reinstated later. "Remove" is the stronger action a super
+ * admin needs: the `Admin` row goes away, any staff this person was managing is
+ * unassigned, and the account is demoted to a customer so they keep their
+ * bookings and history but hold no operator access.
+ *
+ * The user row is deliberately kept. Deleting it would cascade to bookings,
+ * invoices, and the audit trail.
+ */
+export async function removeAdminAccess(input: {
+  reviewer: { id: string; role: RoleKey };
+  userId: string;
+  reason?: string | null;
+  ipAddress?: string | null;
+}) {
+  if (input.reviewer.role !== RoleKey.SUPER_ADMIN) {
+    throw new AccessManagementError("Only a super admin can remove another administrator.");
+  }
+
+  const result = await withSerializableRetry(async (tx) => {
+    const target = await tx.user.findUnique({
+      where: { id: input.userId },
+      select: { id: true, isActive: true, firstName: true, role: { select: { key: true } } },
+    });
+    if (!target) throw new AccessManagementError("User not found.");
+
+    // Read inside the transaction so two concurrent removals cannot both see
+    // two active super admins and remove one each.
+    const activeSuperAdmins = await tx.user.count({
+      where: { role: { key: RoleKey.SUPER_ADMIN }, accountStatus: AccountStatus.ACTIVE, isActive: true },
+    });
+    const refusal = canRemoveAdmin({
+      reviewer: { id: input.reviewer.id, role: input.reviewer.role },
+      target: { id: target.id, role: target.role.key },
+      activeSuperAdmins,
+    });
+    if (refusal) throw new AccessManagementError(refusal);
+
+    const customerRole = await tx.role.findUniqueOrThrow({ where: { key: RoleKey.CUSTOMER } });
+    const adminProfile = await tx.admin.findUnique({ where: { userId: target.id }, select: { id: true } });
+
+    // Staff this admin managed would otherwise be left pointing at a deleted
+    // `Admin` row; `onDelete: SetNull` clears the link, but doing it explicitly
+    // keeps the intent obvious.
+    if (adminProfile) {
+      await tx.staff.updateMany({ where: { adminId: adminProfile.id }, data: { adminId: null } });
+    }
+    await tx.admin.deleteMany({ where: { userId: target.id } });
+    await tx.user.update({ where: { id: target.id }, data: { roleId: customerRole.id } });
+    if (target.isActive) {
+      await tx.customer.upsert({ where: { userId: target.id }, update: {}, create: { userId: target.id } });
+    }
+    return { userId: target.id, firstName: target.firstName, previousRole: target.role.key };
+  });
+
+  await revokeAllSessions(result.userId, "Administrator access removed.").catch(() => undefined);
+  await recordSecurityEvent({
+    type: "ROLE_CHANGED",
+    userId: result.userId,
+    ipAddress: input.ipAddress ?? null,
+    detail: `Administrator access removed (${result.previousRole} -> CUSTOMER) by reviewer ${input.reviewer.id}.${input.reason ? ` Reason: ${input.reason}` : ""}`,
+  });
+  return result;
 }

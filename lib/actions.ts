@@ -8,12 +8,13 @@ import { revalidatePath } from "next/cache";
 import { prisma } from "@/lib/prisma";
 import { toFriendlyError } from "@/lib/errors";
 import { notifyAdmins, notifyUser } from "@/lib/notifications";
-import { getCurrentUser, requireAdmin, requireCustomer, requireStaff, requestIp } from "@/lib/rbac";
+import { getCurrentUser, isAdminRole, requireAdmin, requireCustomer, requireStaff, requestIp, requireSuperAdmin } from "@/lib/rbac";
 import { approveAccessRequest, inviteTeamMember, rejectAccessRequest, resendTeamInvite, submitAccessRequest } from "@/lib/auth/team";
 import {
   approveAccountAccess,
   changeUserRole,
   rejectAccountAccess,
+  removeAdminAccess,
   setAccountActive,
 } from "@/lib/access-management";
 import { recordSecurityEvent } from "@/lib/security-audit";
@@ -750,13 +751,28 @@ export async function updateStaffAction(formData: FormData): Promise<ActionState
   try {
     await requireAdmin();
     await enforceActionRateLimit("staff-update", getString(formData, "id"), 30, 60_000);
+    const rawStaffType = formData.get("staffType");
     const data = staffUpdateSchema.parse({
       id: getString(formData, "id"),
-      isAvailable: getBoolean(formData, "isAvailable"),
+      // Only read when present: the role form posts no `isAvailable`, and
+      // `getBoolean` throws on a missing key rather than returning undefined.
+      isAvailable: formData.has("isAvailable") ? getBoolean(formData, "isAvailable") : undefined,
+      staffType: typeof rawStaffType === "string" && rawStaffType ? rawStaffType : undefined,
     });
-    const existing = await prisma.staff.findUnique({ where: { id: data.id }, select: { status: true } });
+    const existing = await prisma.staff.findUnique({ where: { id: data.id }, select: { status: true, staffType: true } });
     if (!existing) throw new Error("Staff member not found.");
-    if (existing.status !== StaffStatus.ACTIVE) throw new Error("Only active staff can change availability.");
+    if (existing.status !== StaffStatus.ACTIVE) throw new Error("Only active staff can be updated.");
+    if (data.staffType && data.staffType === existing.staffType) {
+      return { success: "No changes to save.", error: null };
+    }
+    if (data.staffType) {
+      await prisma.staff.update({ where: { id: data.id }, data: { staffType: data.staffType } });
+      revalidatePath("/admin/staff");
+      revalidatePath("/staff");
+      revalidatePath("/admin/bookings");
+      emitAdminEvent("staff.updated", { entityId: data.id, action: "role-updated" });
+      return { success: `Role updated to ${data.staffType.toLowerCase().replaceAll("_", " ")}.`, error: null };
+    }
     await prisma.staff.update({ where: { id: data.id }, data: { isAvailable: data.isAvailable } });
     revalidatePath("/admin/staff");
     emitAdminEvent("staff.updated", { entityId: data.id, action: "availability-updated" });
@@ -1007,7 +1023,10 @@ export async function rejectUserAccessAction(formData: FormData): Promise<Action
   }
 }
 
-/** Explicit privilege grant. Separated from approval on purpose. */
+/**
+ * Explicit privilege grant. Separated from approval on purpose: approving grants
+ * workspace access, while a role change grants or removes privilege.
+ */
 export async function changeUserRoleAction(formData: FormData): Promise<ActionState> {
   try {
     const reviewer = await requireAdmin();
@@ -1017,17 +1036,115 @@ export async function changeUserRoleAction(formData: FormData): Promise<ActionSt
     if (!userId || !nextRole) throw new Error("Choose a valid role.");
     await enforceActionRateLimit("user-role", userId, 20, 60_000);
     const requestedStaffType = getOptionalString(formData, "staffType");
-    await changeUserRole({
+    const outcome = await changeUserRole({
       reviewer: { id: reviewer.id, role: reviewer.role },
       userId,
       nextRole,
       staffType: Object.values(StaffType).find((type) => type === requestedStaffType) ?? null,
+      ipAddress: await requestIp(),
     });
     revalidatePath("/admin/admins");
     revalidatePath("/admin/security");
     revalidatePath("/admin/staff");
     revalidatePath("/admin/notifications");
-    return { success: `Role updated to ${nextRole.toLowerCase().replaceAll("_", " ")}.`, error: null };
+    // The old role's workspace can change too (an admin who becomes a customer
+    // no longer has an `/admin` page to be stale on).
+    if (outcome.previousRole === RoleKey.ADMIN || outcome.previousRole === RoleKey.SUPER_ADMIN) revalidatePath("/admin");
+    if (outcome.previousRole === RoleKey.STAFF) revalidatePath("/staff");
+    if (outcome.role === RoleKey.STAFF) revalidatePath("/staff");
+    return {
+      success: `Role updated to ${nextRole.toLowerCase().replaceAll("_", " ")}.`,
+      error: null,
+    };
+  } catch (error) {
+    return { success: null, error: messageFromError(error) };
+  }
+}
+
+/**
+ * Promotes an existing account to administrator.
+ *
+ * `/admin/admins` lists only administrator accounts, which is what makes that
+ * screen readable — but it also means there is no row on it to click "promote"
+ * against for a staff member or customer. This is that capability, addressed by
+ * email address rather than by showing the whole user base again.
+ *
+ * Delegated to `changeUserRole` so a promotion is audited and revokes the
+ * target's live sessions exactly like any other role change.
+ */
+export async function grantAdminAccessAction(formData: FormData): Promise<ActionState> {
+  try {
+    const reviewer = await requireSuperAdmin();
+    const email = getString(formData, "email").trim().toLowerCase();
+    if (!email || !email.includes("@")) throw new Error("Enter the email address of the account to promote.");
+
+    const target = await prisma.user.findUnique({
+      where: { email },
+      select: { id: true, firstName: true, role: { select: { key: true } }, accountStatus: true, isActive: true },
+    });
+    // Same wording whether the address is unknown or belongs to nobody we can
+    // promote, so this does not become a way to test whether an address has an
+    // account here.
+    if (!target) throw new Error("No account with that email address was found.");
+    if (isAdminRole(target.role.key)) throw new Error("That account already holds an administrator role.");
+
+    await changeUserRole({
+      reviewer: { id: reviewer.id, role: reviewer.role },
+      userId: target.id,
+      nextRole: RoleKey.ADMIN,
+      ipAddress: await requestIp(),
+    });
+
+    // A promotion into a role that requires a second factor would otherwise
+    // strand the person at the "set up 2FA" gate with no obvious way forward.
+    if (!target.isActive || target.accountStatus !== AccountStatus.ACTIVE) {
+      await approveAccountAccess({
+        reviewer: { id: reviewer.id, role: reviewer.role },
+        userId: target.id,
+        reason: "Approved on administrator promotion.",
+        ipAddress: await requestIp(),
+      }).catch(() => undefined);
+    }
+
+    revalidatePath("/admin/admins");
+    revalidatePath("/admin/security");
+    revalidatePath("/admin/staff");
+    revalidatePath("/admin/customers");
+    revalidatePath("/admin/notifications");
+
+    const name = [target.firstName].filter(Boolean).join(" ").trim();
+    return {
+      success: `${name || email} is now an administrator. They must set up two-factor authentication before reaching any admin page.`,
+      error: null,
+    };
+  } catch (error) {
+    return { success: null, error: messageFromError(error) };
+  }
+}
+
+/**
+ * Removes another administrator's operator access. Super admin only, enforced
+ * in `removeAdminAccess` as well as here so the rule cannot be bypassed by
+ * calling the service directly.
+ */
+export async function removeAdminAction(formData: FormData): Promise<ActionState> {
+  try {
+    const reviewer = await requireSuperAdmin();
+    const userId = getString(formData, "userId");
+    if (!userId) throw new Error("Missing administrator.");
+    await enforceActionRateLimit("admin-remove", userId, 20, 60_000);
+    const result = await removeAdminAccess({
+      reviewer: { id: reviewer.id, role: reviewer.role },
+      userId,
+      reason: getOptionalString(formData, "reason") ?? null,
+      ipAddress: await requestIp(),
+    });
+    revalidatePath("/admin/admins");
+    revalidatePath("/admin/security");
+    revalidatePath("/admin/staff");
+    revalidatePath("/admin/bookings");
+    revalidatePath("/admin/notifications");
+    return { success: `${result.firstName} was removed from the admin team and is now a customer.`, error: null };
   } catch (error) {
     return { success: null, error: messageFromError(error) };
   }

@@ -2,6 +2,7 @@ import Link from "next/link";
 import { CalendarDays, PlusCircle } from "lucide-react";
 import { prisma } from "@/lib/prisma";
 import { AccountMenu } from "@/components/auth/account-menu";
+import { ThemeToggle } from "@/components/marketing/theme-toggle";
 import { formatRoleLabel } from "@/lib/role-label";
 import { getAuthContext } from "@/lib/auth/server";
 
@@ -28,8 +29,17 @@ export default async function CustomerLayout({ children }: Readonly<{ children: 
                 roleLabel={formatRoleLabel(signedIn.user.role)}
               />
             ) : (
-              <Link href="/sign-in" className="rounded-full border border-[var(--line)] px-4 py-2 font-medium transition hover:bg-[var(--surface-muted)]">Sign in</Link>
+              // Not `/sign-in`: that is the first-party staff password form,
+              // which a customer has no credentials for. The chooser asks first.
+              <Link href="/auth-choice" className="rounded-full border border-[var(--line)] px-4 py-2 font-medium transition hover:bg-[var(--surface-muted)]">Sign in</Link>
             )}
+            {/*
+              Scoped to the customer area, so choosing dark here leaves the
+              admin panel and the public site on their own preferences. Without
+              this control a customer could only change theme from the marketing
+              site, which changed it everywhere.
+            */}
+            <ThemeToggle />
           </nav>
         </div>
       </header>

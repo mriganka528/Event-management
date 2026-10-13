@@ -54,6 +54,34 @@ export function isAccountUsable(status: AccountStatus, isActive: boolean) {
   return isActive && status === AccountStatus.ACTIVE;
 }
 
+/**
+ * Whether this account still owes us a password.
+ *
+ * The `mustSetPassword` flag is only meaningful for accounts that authenticate
+ * first-party. A customer created by a public booking request has no password
+ * hash, and neither does a customer federated from Clerk — both sign in through
+ * the provider and can never complete a first-party password flow.
+ *
+ * Treating any null hash as "must set a password" therefore locked those
+ * customers out permanently: every guard resolved them to the `must-set-password`
+ * state and redirected them to `/activate`, where no such flow existed for them.
+ * In practice the customer dashboard simply never rendered, which reads as "my
+ * orders are missing" rather than as an authentication bug.
+ *
+ * A linked `clerkId` is the authoritative signal that the provider owns this
+ * identity. Everything else keeps the original behaviour, so a team account
+ * created by an admin (`mustSetPassword: true`, no hash yet) is still correctly
+ * sent to `/activate`.
+ */
+export function isPasswordRequired(account: {
+  mustSetPassword: boolean;
+  passwordHash: string | null;
+  clerkId?: string | null;
+}) {
+  if (account.clerkId) return false;
+  return account.mustSetPassword || !account.passwordHash;
+}
+
 /** Admins and super admins must have two-factor authentication. */
 export function requiresMfa(role: RoleKey) {
   return isAdminRole(role);
@@ -139,6 +167,38 @@ export function canModifyAccount(reviewer: { id: string; role: RoleKey }, target
 export function canGrantRole(reviewerRole: RoleKey, nextRole: RoleKey) {
   if (nextRole === RoleKey.SUPER_ADMIN && reviewerRole !== RoleKey.SUPER_ADMIN) {
     return "Only a super admin can grant super admin access.";
+  }
+  return null;
+}
+
+/**
+ * Who may revoke administrator access, as distinct from suspending an account.
+ *
+ * Suspension is reversible and available to any admin; removal destroys the
+ * privilege and demotes the person, so it is super-admin-only. Removing a super
+ * admin is refused outright rather than merely restricted, because the only way
+ * to do it safely is to demote them first — which is a different, deliberate
+ * action with its own audit entry.
+ *
+ * `activeSuperAdmins` guards the last-super-admin case: the screen that can undo
+ * a bad removal is itself only reachable by a super admin, so removing the final
+ * one would lock everyone out of the workspace permanently.
+ */
+export function canRemoveAdmin(input: {
+  reviewer: { id: string; role: RoleKey };
+  target: { id: string; role: RoleKey };
+  activeSuperAdmins: number;
+}) {
+  if (input.reviewer.role !== RoleKey.SUPER_ADMIN) {
+    return "Only a super admin can remove another administrator.";
+  }
+  if (input.target.id === input.reviewer.id) return "You cannot remove your own account.";
+  if (!isAdminRole(input.target.role)) return "This person is not an administrator.";
+  if (input.target.role === RoleKey.SUPER_ADMIN) {
+    if (input.activeSuperAdmins <= 1) {
+      return "This is the only active super admin. Promote another super admin first.";
+    }
+    return "A super admin cannot be removed. Change their role to admin first.";
   }
   return null;
 }

@@ -4,6 +4,7 @@ import { useActionState, useEffect, useState } from "react";
 import { ArrowRight, Loader2, Mail, ShieldCheck, Smartphone } from "lucide-react";
 import { confirmTwoFactorSetupAction, startTwoFactorSetupAction } from "@/lib/auth-actions";
 import { AuthFeedback, IDLE_AUTH_STATE, isAwaitingCode, nextRoute } from "@/components/auth/auth-feedback";
+import { useAuthToast } from "@/components/auth/auth-toast";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
@@ -20,6 +21,8 @@ export function TwoFactorSetupForm({ phoneAvailable, defaultPhone }: { phoneAvai
   const [phone, setPhone] = useState(defaultPhone ?? "");
   const [code, setCode] = useState("");
 
+  useAuthToast(startState);
+  useAuthToast(confirmState);
   useEffect(() => {
     const next = nextRoute(confirmState);
     if (next) window.location.assign(next);

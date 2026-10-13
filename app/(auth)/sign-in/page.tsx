@@ -19,9 +19,13 @@ export const metadata: Metadata = {
 
 const ALLOWED_REPORT = ["/admin", "/staff", "/customer/dashboard", "/customer/bookings/new"] as const;
 
-export default async function SignInPage({ searchParams }: { searchParams: Promise<{ returnTo?: string; registered?: string }> }) {
+export default async function SignInPage({ searchParams }: { searchParams: Promise<{ returnTo?: string; registered?: string; password?: string }> }) {
   const query = await searchParams;
   const returnTo = safeReturnTo(query.returnTo, ALLOWED_REPORT);
+  // Set by the password reset, which redirects here because it has just dropped
+  // every session. A query flag survives that hand-off; a client-side toast would
+  // not, because the whole page is replaced.
+  const passwordReset = query.password === "reset";
 
   // Someone who is already signed in has no business on this page.
   if (await isSignedIn()) {
@@ -50,6 +54,12 @@ export default async function SignInPage({ searchParams }: { searchParams: Promi
           </p>
         </div>
 
+        {passwordReset ? (
+          <p role="status" className="rounded-[28px] border border-[color:color-mix(in_srgb,var(--success-text)_28%,transparent)] bg-[var(--success-soft)] p-5 text-sm font-medium text-[var(--success-text)]">
+            Your password has been changed. Sign in with your new password.
+          </p>
+        ) : null}
+
         <Card>
           <CardHeader>
             <CardTitle className="text-xl">Your credentials</CardTitle>
@@ -57,6 +67,11 @@ export default async function SignInPage({ searchParams }: { searchParams: Promi
           </CardHeader>
           <CardContent>
             <SignInForm returnTo={returnTo ?? undefined} />
+            <p className="mt-4 text-center text-sm text-[var(--muted)]">
+              <Link href="/forgot-password" className="font-semibold text-[var(--brand-dark)] underline underline-offset-4 hover:opacity-80">
+                Forgot your password?
+              </Link>
+            </p>
           </CardContent>
         </Card>
 

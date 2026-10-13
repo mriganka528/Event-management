@@ -25,8 +25,17 @@ import { isMailConfigured } from "@/lib/mailer";
 const OTP_TTL_MS = 10 * 60 * 1000;
 const OTP_LENGTH = 6;
 const RESEND_COOLDOWN_MS = 60 * 1000;
-/** At most one unconsumed challenge per destination/purpose inside a window. */
-const MAX_ISSUES_PER_WINDOW = 5;
+/**
+ * At most this many challenges per destination and purpose per hour, counted
+ * across the whole window whether or not each one was redeemed.
+ *
+ * This is a delivery-flooding bound, not a lockout: it stops the mail or SMS
+ * provider being turned into a spam relay by repeatedly asking for a code for
+ * somebody else's address. It therefore has to stay comfortably above how often a
+ * real account legitimately signs in or changes a credential in an hour, because
+ * once it is reached the account can only be told to wait.
+ */
+const MAX_ISSUES_PER_WINDOW = 10;
 const ISSUE_WINDOW_MS = 60 * 60 * 1000;
 
 export class OtpError extends Error {
@@ -57,7 +66,7 @@ function normaliseDestination(channel: OtpChannel, raw: string): string | null {
   return normalisePhone(raw);
 }
 
-async function deliverEmailOtp(input: { to: string; code: string; purpose: OtpPurpose; ttlMinutes: number }) {
+async function deliverEmailOtp(input: { to: string; code: string; purpose: string; ttlMinutes: number }) {
   if (!isMailConfigured()) {
     // Dry-run: the code is logged so local development stays usable without SMTP.
     console.info(`[otp] email ${input.purpose} for ${input.to}: ${input.code}`);
@@ -76,6 +85,14 @@ export type IssueOtpInput = {
   purpose: OtpPurpose;
   boundSessionId?: string | null;
   ipAddress?: string | null;
+  /**
+   * Wording key for the email, for when one purpose needs two different
+   * sentences. `PASSWORD_RESET` covers both "I forgot it" and "I am changing it
+   * while signed in", and a subject telling somebody who is mid-way through a
+   * deliberate change to "Reset your password" reads like an account takeover.
+   * Only the copy changes; the challenge is identical either way.
+   */
+  mailCopy?: string;
 };
 
 export type IssueOtpResult =
@@ -125,7 +142,7 @@ export async function issueOtp(input: IssueOtpInput): Promise<IssueOtpResult> {
   const ttlMinutes = Math.round(OTP_TTL_MS / 60_000);
   let deliveredBy: string;
   if (input.channel === OtpChannel.EMAIL) {
-    const mail = await deliverEmailOtp({ to: destination, code, purpose: input.purpose, ttlMinutes });
+    const mail = await deliverEmailOtp({ to: destination, code, purpose: input.mailCopy ?? input.purpose, ttlMinutes });
     if (!mail.sent) {
       return { ok: false, code: "CHANNEL_UNAVAILABLE", message: "The code could not be sent. Try again shortly." };
     }

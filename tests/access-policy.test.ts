@@ -23,6 +23,8 @@ import {
   ALLOWED_RETURN_PATHS,
   canGrantRole,
   canModifyAccount,
+  canRemoveAdmin,
+  isPasswordRequired,
   canReviewRoleRequest,
   deriveAccessState,
   gatePathForState,
@@ -143,11 +145,92 @@ test("only a super admin may modify or grant super admin", () => {
   assert.equal(canGrantRole(RoleKey.ADMIN, RoleKey.STAFF), null);
 });
 
+test("a provider-owned customer is never asked to set a password", () => {
+  // The bug this covers: `mustSetPassword` used to be derived as
+  // `mustSetPassword || !passwordHash`. Every Clerk customer, and every customer
+  // created by a public booking request, has a null hash — so all of them
+  // resolved to the `must-set-password` state and were redirected to /activate,
+  // where no first-party password flow exists for them. The dashboard never
+  // rendered, which surfaced as "my orders are missing" rather than as an auth
+  // error.
+  const noHash = { mustSetPassword: false, passwordHash: null };
+
+  assert.equal(isPasswordRequired({ ...noHash, clerkId: "user_abc" }), false, "a Clerk customer must not be asked for a password");
+  assert.equal(
+    isPasswordRequired({ ...noHash, clerkId: null }),
+    true,
+    "a guest-booking customer that has not yet linked an identity still has no way to sign in, so it is held at the gate",
+  );
+
+  // A team account created by an admin must still be sent to /activate, even
+  // though it also has no hash yet.
+  assert.equal(
+    isPasswordRequired({ mustSetPassword: true, passwordHash: null, clerkId: null }),
+    true,
+    "an invited team member must complete activation",
+  );
+  // And a linked identity outranks a stale flag, so a provider account is never
+  // trapped by one.
+  assert.equal(
+    isPasswordRequired({ mustSetPassword: true, passwordHash: null, clerkId: "user_abc" }),
+    false,
+    "the provider owns this identity, so a stale mustSetPassword flag must not lock it out",
+  );
+
+  // An ordinary first-party account with a password is never asked again.
+  assert.equal(isPasswordRequired({ mustSetPassword: false, passwordHash: "scrypt$...", clerkId: null }), false);
+  assert.equal(isPasswordRequired({ mustSetPassword: true, passwordHash: "scrypt$...", clerkId: null }), true);
+});
+
 test("only a super admin may approve administrator access requests", () => {
   assert.ok(canReviewRoleRequest(RoleKey.ADMIN, RoleKey.ADMIN));
   assert.equal(canReviewRoleRequest(RoleKey.SUPER_ADMIN, RoleKey.ADMIN), null);
   assert.equal(canReviewRoleRequest(RoleKey.ADMIN, RoleKey.STAFF), null);
   assert.equal(canReviewRoleRequest(RoleKey.SUPER_ADMIN, RoleKey.STAFF), null);
+});
+
+test("removing an administrator is super-admin-only and irreversible in role terms", () => {
+  const admin = { id: "a1", role: RoleKey.ADMIN };
+  const superAdmin = { id: "s1", role: RoleKey.SUPER_ADMIN };
+  const otherAdmin = { id: "a2", role: RoleKey.ADMIN };
+
+  // Suspension stays available to any admin; removal must not.
+  assert.match(
+    canRemoveAdmin({ reviewer: admin, target: otherAdmin, activeSuperAdmins: 2 }) ?? "",
+    /only a super admin/i,
+  );
+  assert.match(
+    canRemoveAdmin({ reviewer: { id: "c1", role: RoleKey.CUSTOMER }, target: otherAdmin, activeSuperAdmins: 2 }) ?? "",
+    /only a super admin/i,
+  );
+
+  // Self-removal is refused even for a super admin.
+  assert.match(canRemoveAdmin({ reviewer: superAdmin, target: superAdmin, activeSuperAdmins: 2 }) ?? "", /your own account/i);
+
+  // A non-admin target is not removable here at all.
+  assert.match(
+    canRemoveAdmin({ reviewer: superAdmin, target: { id: "st1", role: RoleKey.STAFF }, activeSuperAdmins: 2 }) ?? "",
+    /not an administrator/i,
+  );
+
+  // The ordinary case: a super admin removing another admin.
+  assert.equal(canRemoveAdmin({ reviewer: superAdmin, target: otherAdmin, activeSuperAdmins: 2 }), null);
+});
+
+test("a super admin cannot be removed, and the last one definitely cannot", () => {
+  const superAdmin = { id: "s1", role: RoleKey.SUPER_ADMIN };
+  const otherSuper = { id: "s2", role: RoleKey.SUPER_ADMIN };
+
+  // Refused by role, not merely by seniority: demotion is the deliberate route.
+  assert.match(
+    canRemoveAdmin({ reviewer: superAdmin, target: otherSuper, activeSuperAdmins: 2 }) ?? "",
+    /cannot be removed/i,
+  );
+  // And the last active super admin gets a message that says what to do next,
+  // because the screen that can undo a mistake lives behind the same role.
+  const last = canRemoveAdmin({ reviewer: superAdmin, target: otherSuper, activeSuperAdmins: 1 }) ?? "";
+  assert.match(last, /only active super admin/i);
+  assert.match(last, /promote another/i);
 });
 
 test("an email is never auto-merged into an existing identity", () => {
@@ -348,12 +431,26 @@ test("the old Clerk-era admin route is still gone", () => {
 test("the customer provider area only exists where it is meant to", () => {
   // A leftover page pointing at a deleted route is a 404 in production and is
   // invisible to the type checker, so the routes are asserted directly.
+  //
+  // The two hosted pages are *optional catch-alls*. Clerk's `routing="path"`
+  // owns a whole subtree beneath its mount path (it pushes `continue`,
+  // `factor-one`, and its callback states as real URLs), so mounting a bare
+  // `page.tsx` there makes `<SignIn/>`/`<SignUp/>` throw at runtime with
+  // "the route is not a catch-all route". `[[...rest]]` also still matches the
+  // bare path, so nothing that links to `/customer/auth/sign-in` breaks.
   for (const expected of [
-    "app/(customer)/customer/auth/sign-in",
-    "app/(customer)/customer/auth/sign-up",
+    "app/(customer)/customer/auth/sign-in/[[...rest]]",
+    "app/(customer)/customer/auth/sign-up/[[...rest]]",
     "app/(customer)/customer/auth/complete",
   ]) {
     assert.equal(existsSync(`${expected}/page.tsx`), true, `${expected} is missing`);
+  }
+  // The bare, non-catch-all mount is the bug that was fixed; it must not return.
+  for (const forbidden of [
+    "app/(customer)/customer/auth/sign-in/page.tsx",
+    "app/(customer)/customer/auth/sign-up/page.tsx",
+  ]) {
+    assert.equal(existsSync(forbidden), false, `${forbidden} must be a catch-all route`);
   }
   // The old first-party registration screen is superseded, and must not linger
   // as a second way in.
@@ -363,20 +460,132 @@ test("the customer provider area only exists where it is meant to", () => {
   assert.match(proxy, /LEGACY_REGISTER_PATH\s*=\s*"\/register"/, "the legacy /register alias must be handled in the edge layer");
 });
 
+test("the account chooser exists and is reachable as public auth", () => {
+  // "Sign in" must never point straight at one of the two forms: customers have
+  // no password for the staff form, and a provider sign-in refuses to federate a
+  // staff address. The chooser asks first, so it has to exist and has to be
+  // exempted from the edge-layer auth redirect like every other auth screen.
+  assert.equal(existsSync("app/(auth)/auth-choice/page.tsx"), true, "the account chooser page is missing");
+  const proxy = readFileSync("proxy.ts", "utf8");
+  assert.match(proxy, /"\/auth-choice"/, "/auth-choice must be listed as a public auth path in the edge layer");
+  // Every layout that offers a sign-in link has to point at the chooser.
+  for (const layout of [
+    "app/(customer)/customer/layout.tsx",
+    "app/(staff)/staff/layout.tsx",
+    "components/layout/account-access.tsx",
+  ]) {
+    const source = readFileSync(layout, "utf8");
+    assert.doesNotMatch(source, /href=["'{]\s*["'`]\/sign-in["'`]/, `${layout} still links straight at the staff sign-in form`);
+  }
+});
+
+test("a selector that edits an existing value is pre-set to that value", () => {
+  // A `<select>` with no `value`/`defaultValue` paints its *first* option. The
+  // role selectors listed roles in a fixed order starting at SUPER_ADMIN, so
+  // every row read "Super admin" regardless of who it was, and pressing Save
+  // without touching the control silently promoted whoever was an electrician.
+  //
+  // Scanned rather than left to review because the symptom (a control showing
+  // the wrong thing) is invisible to the type checker and only shows up as a
+  // mysterious role change weeks later.
+  const EDITING_SELECTORS: Array<[string, RegExp]> = [
+    // The admin role selector is rendered twice (mobile card + desktop table).
+    ["app/(admin)/admin/admins/page.tsx", /<Select\s+name="role"[^>]*\/>/g],
+    ["app/(admin)/admin/staff/page.tsx", /<Select\s+[^>]*name="staffType"[^>]*defaultValue[^>]*\/>/g],
+  ];
+
+  const [adminPage, adminPattern] = EDITING_SELECTORS[0];
+  const adminSource = readFileSync(adminPage, "utf8");
+  const adminSelects = [...adminSource.matchAll(adminPattern)];
+  assert.ok(adminSelects.length > 0, `no role selector found in ${adminPage}, so the scan is broken`);
+  for (const match of adminSelects) {
+    assert.match(
+      match[0],
+      /defaultValue=/,
+      `role selector in ${adminPage} has no defaultValue, so it will always show the first option: ${match[0]}`,
+    );
+  }
+
+  const [staffPage, staffPattern] = EDITING_SELECTORS[1];
+  const staffSource = readFileSync(staffPage, "utf8");
+  // The "add a staff member" form legitimately has no default (the role has not
+  // been chosen yet), so only the per-member edit control is asserted here.
+  assert.match(
+    staffSource,
+    /name="staffType"[^>]*defaultValue=\{member\.staffType\}/,
+    `the staff role editor in ${staffPage} must be pre-set to the member's current staffType`,
+  );
+  assert.ok(staffPattern.test(staffSource), `no pre-set staff role editor found in ${staffPage}`);
+});
+
+test("the access-control screen only lists administrator accounts", () => {
+  // Staff and customer records have their own pages. Listing every customer in
+  // the access-control screen made it unusable and let a role be changed from the
+  // wrong place, so the query filters by the two admin role keys.
+  const source = readFileSync("lib/admin-data.ts", "utf8");
+  assert.match(source, /ADMIN_ROLE_KEYS\s*=\s*\[RoleKey\.SUPER_ADMIN,\s*RoleKey\.ADMIN\]/, "getAdminUsers must scope itself to the admin roles");
+  assert.match(source, /where:\s*\{\s*roleId:\s*\{\s*in:/, "getAdminUsers must filter by role id, not filter after the fact");
+});
+
+test("filtering the list does not remove the ability to grant admin access", () => {
+  // The regression this guards: once the table lists only administrators, there
+  // is no row left to click "promote" against for a staff member or customer,
+  // and neither `/admin/staff` nor `/admin/customers` has a role control. The
+  // screen silently became read-only.
+  const page = readFileSync("app/(admin)/admin/admins/page.tsx", "utf8");
+  assert.match(page, /grantAdminAccessFormAction/, "the admins page must offer a way to promote an account");
+  assert.match(page, /name="email"/, "the promote control needs an email field");
+
+  const actions = readFileSync("lib/actions.ts", "utf8");
+  assert.match(actions, /export async function grantAdminAccessAction/, "the grant action must exist");
+  // It has to reuse the audited role-change path rather than writing the role
+  // directly, or the promotion would skip the security log and session revoke.
+  assert.match(
+    actions,
+    /grantAdminAccessAction[\s\S]*?await changeUserRole\(/,
+    "the grant action must delegate to changeUserRole so it is audited",
+  );
+  assert.match(actions, /grantAdminAccessAction[\s\S]*?requireSuperAdmin\(\)/, "only a super admin may grant admin access");
+});
+
+test("demoting away from admin removes the admin profile row", () => {
+  // Leaving the `Admin` row behind produced an account that was a staff member
+  // by role yet still owned an admin profile. That then blocked staff removal
+  // with "this person is also an administrator" for somebody who no longer was
+  // one — and made the admin list disagree with the profiles table.
+  const source = readFileSync("lib/access-management.ts", "utf8");
+  const changeRole = source.slice(source.indexOf("export async function changeUserRole"));
+  assert.match(
+    changeRole,
+    /if \(!isAdminRole\(input\.nextRole\)\) \{\s*await tx\.admin\.deleteMany\(\{ where: \{ userId: target\.id \} \}\);/,
+    "changeUserRole must delete the Admin row when the new role is not an administrator",
+  );
+  // And `removeAdminAccess` already relies on that same cleanup.
+  const removeAdmin = source.slice(source.indexOf("export async function removeAdminAccess"));
+  assert.match(removeAdmin, /tx\.admin\.deleteMany/, "removeAdminAccess must delete the Admin row too");
+});
+
 test("every redirect target in the auth layer actually exists", () => {
   // A gate that redirects to a missing page turns a clear denial into a 404.
   // Routes live under layout groups (`app/(auth)/sign-in`, `app/(admin)/admin`),
   // so existence is checked by scanning for a matching `page.tsx` anywhere and
   // ignoring the group segments, which do not appear in the URL.
   const pageRoutes = new Set<string>();
+  const CATCH_ALL = /^\[(\[)?\.\.\..+\]\]?$/;
   for (const file of walk("app")) {
     const parts = file.split(/[\\/]/).filter(Boolean);
     if (parts.at(-1) !== "page.tsx") continue;
-    const route = parts
+    const segments = parts
       .slice(parts.indexOf("app") + 1, -1)
-      .filter((segment) => !(segment.startsWith("(") && segment.endsWith(")")))
-      .join("/");
+      .filter((segment) => !(segment.startsWith("(") && segment.endsWith(")")));
+    const route = segments.join("/");
     pageRoutes.add(route ? `/${route}` : "/");
+    // An optional catch-all serves its own path as well, so
+    // `/customer/auth/sign-in/[[...rest]]` answers `/customer/auth/sign-in`.
+    if (segments.length > 0 && CATCH_ALL.test(segments.at(-1)!)) {
+      const parent = segments.slice(0, -1).join("/");
+      pageRoutes.add(parent ? `/${parent}` : "/");
+    }
   }
   assert.ok(pageRoutes.size > 10, `route scan found only ${pageRoutes.size} routes, which means it is broken`);
 

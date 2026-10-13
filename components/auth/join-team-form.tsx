@@ -5,6 +5,7 @@ import { Loader2, Send, ShieldCheck } from "lucide-react";
 import { StaffType } from "@prisma/client";
 import { submitAccessRequestAction } from "@/lib/auth-actions";
 import { AuthFeedback, IDLE_AUTH_STATE } from "@/components/auth/auth-feedback";
+import { useAuthToast } from "@/components/auth/auth-toast";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
@@ -23,6 +24,8 @@ const staffTypeOptions = Object.values(StaffType).map((type) => ({
 export function JoinTeamForm() {
   const [state, formAction, pending] = useActionState(submitAccessRequestAction, IDLE_AUTH_STATE);
   const [role, setRole] = useState<"ADMIN" | "STAFF">("STAFF");
+
+  useAuthToast(state);
 
   if (state.status === "success") {
     return (

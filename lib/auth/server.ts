@@ -10,7 +10,7 @@ import { sha256 } from "@/lib/auth/password";
 import { readSessionToken, touchSession } from "@/lib/auth/session";
 import { isHttps, pendingTwoFactorCookieName as pendingCookieName } from "@/lib/auth/cookie-names";
 import { recordSecurityEvent } from "@/lib/security-audit";
-import { deriveAccessState, isAdminRole, type AccessState } from "@/lib/access-policy";
+import { deriveAccessState, isAdminRole, isPasswordRequired, type AccessState } from "@/lib/access-policy";
 
 /**
  * Request-scoped identity resolution, replacing the former Clerk `auth()`.
@@ -86,6 +86,9 @@ const USER_SELECT = {
   avatarUrl: true,
   isActive: true,
   accountStatus: true,
+  // Read by `isPasswordRequired` to tell a provider-owned identity apart from
+  // a team account that still owes us a password. See that function.
+  clerkId: true,
   twoFactorChannel: true,
   twoFactorEnabledAt: true,
   mustSetPassword: true,
@@ -112,12 +115,15 @@ function mapUser(record: Awaited<ReturnType<typeof loadUser>>): AuthUser | null 
     isActive: record.isActive,
     twoFactorChannel: record.twoFactorChannel,
     twoFactorEnabled: Boolean(record.twoFactorEnabledAt),
-    mustSetPassword: record.mustSetPassword || !record.passwordHash,
     lastLoginAt: record.lastLoginAt,
     suspensionReason: record.suspensionReason,
     customerProfile: record.customerProfile,
     adminProfile: record.adminProfile,
     staffProfile: record.staffProfile,
+    // Resolved by the shared policy so the rule is unit-testable. This single
+    // line is the difference between a Clerk customer reaching their dashboard
+    // and being bounced to an activation screen they can never satisfy.
+    mustSetPassword: isPasswordRequired(record),
   };
 }
 

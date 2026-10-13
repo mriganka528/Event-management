@@ -4,6 +4,8 @@ import { ClerkProvider } from "@clerk/nextjs";
 import { siteUrl } from "@/lib/site";
 import { clerkAppearance } from "@/lib/clerk-theme";
 import { AppToaster } from "@/components/providers/app-toaster";
+import { ThemeScopeSync } from "@/components/marketing/theme-scope-sync";
+import { themeBootstrapScript } from "@/lib/theme-scope";
 import "./globals.css";
 
 const sans = DM_Sans({ variable: "--font-sans", subsets: ["latin"] });
@@ -51,7 +53,7 @@ export default function RootLayout({ children }: Readonly<{ children: React.Reac
   return (
     <html lang="en" suppressHydrationWarning>
       <head>
-        <script dangerouslySetInnerHTML={{ __html: `(() => { try { const saved = localStorage.getItem('theme'); const theme = saved === 'dark' || saved === 'light' ? saved : (window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light'); document.documentElement.dataset.theme = theme; } catch (_) {} })()` }} />
+        <script dangerouslySetInnerHTML={{ __html: themeBootstrapScript() }} />
       </head>
       <body className={`${sans.variable} ${display.variable} bg-[var(--background)] text-[var(--foreground)] antialiased`}>
         {/*
@@ -61,6 +63,12 @@ export default function RootLayout({ children }: Readonly<{ children: React.Reac
           exchanged for the ordinary local session.
         */}
         <ClerkProvider appearance={clerkAppearance}>{children}</ClerkProvider>
+        {/*
+          Applies the current area's theme on navigation. Required because
+          `/staff` and `/customer` render no toggle of their own, so the control
+          that last wrote `data-theme` is not there to correct it.
+        */}
+        <ThemeScopeSync />
         <AppToaster />
       </body>
     </html>

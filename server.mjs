@@ -87,7 +87,12 @@ io.use(async (socket, nextMiddleware) => {
   try {
     const user = await prisma.user.findFirst({
       where: {
-        authSessions: { some: { tokenHash: sha256(token), status: "ACTIVE" } },
+        // `sessions`, not `authSessions`: the relation is named after the field on
+        // User, and `authSessions` is only the *model* name. Prisma rejects an
+        // unknown key, the throw was swallowed, and every single handshake answered
+        // "Authentication failed" — which is why the live badge sat on "Connecting"
+        // forever no matter how healthy the connection actually was.
+        sessions: { some: { tokenHash: sha256(token), status: "ACTIVE" } },
         isActive: true,
         accountStatus: AccountStatus.ACTIVE,
       },
@@ -97,7 +102,10 @@ io.use(async (socket, nextMiddleware) => {
     socket.data.userId = user.id;
     socket.data.role = user.role.key;
     nextMiddleware();
-  } catch {
+  } catch (error) {
+    // Logged rather than swallowed: a silent catch here turned a bad query into a
+    // permanently broken feature with nothing to diagnose it from.
+    console.error("[socket] authentication failed:", error instanceof Error ? error.message : error);
     nextMiddleware(new Error("Authentication failed"));
   }
 });

@@ -14,7 +14,9 @@ import {
   deletePackageAction,
   deleteServiceAction,
   createStaffAction,
+  grantAdminAccessAction,
   rejectUserAccessAction,
+  removeAdminAction,
   removeStaffAction,
   resendStaffInviteAction,
   markAllNotificationsReadAction,
@@ -138,6 +140,12 @@ export async function rejectUserAccessFormAction(formData: FormData) {
 }
 export async function changeUserRoleFormAction(formData: FormData) {
   return runAction(changeUserRoleAction, formData);
+}
+export async function removeAdminFormAction(formData: FormData) {
+  return runAction(removeAdminAction, formData);
+}
+export async function grantAdminAccessFormAction(formData: FormData) {
+  return runAction(grantAdminAccessAction, formData);
 }
 export async function updateOwnAvailabilityFormAction(formData: FormData) {
   return runAction(updateOwnAvailabilityAction, formData);

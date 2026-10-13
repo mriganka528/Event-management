@@ -41,6 +41,9 @@ function httpsRequest(request: NextRequest): boolean {
 /** Public auth screens. Listed so they are never treated as protected. */
 const PUBLIC_AUTH_PATHS = new Set([
   "/sign-in",
+  // Where "sign in" lands when the visitor has not said which kind of account
+  // they hold. It only links onward, so it is public like the forms it offers.
+  "/auth-choice",
   "/join-the-team",
   "/verify-two-factor",
   "/activate",
@@ -48,6 +51,11 @@ const PUBLIC_AUTH_PATHS = new Set([
   "/two-factor-required",
   "/access-pending",
   "/access-denied",
+  // Password recovery. `/reset-password` holds a short-lived session issued by a
+  // verified reset code, but it is a credential screen, not a workspace, so it
+  // must be framed- and cache-proof like the rest of the auth area.
+  "/forgot-password",
+  "/reset-password",
 ]);
 
 /**

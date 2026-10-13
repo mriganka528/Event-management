@@ -1,18 +1,36 @@
 import type { NextConfig } from "next";
 
 const isProduction = process.env.NODE_ENV === "production";
+
+/**
+ * Cloudflare Turnstile, the CAPTCHA provider Clerk uses for bot protection on
+ * `<SignIn/>` and `<SignUp/>`.
+ *
+ * It is a separate origin from Clerk and serves its own script, iframe, and API
+ * calls. Without all three allowances Clerk renders its widget shell, the
+ * challenge never initialises, and the component reports:
+ *
+ *   The CAPTCHA failed to load. This may be due to an unsupported browser or a
+ *   browser extension.
+ *
+ * That message blames the visitor's browser, but the actual cause was this
+ * policy — nothing about extensions was involved. Added as one explicit origin
+ * rather than a wildcard so the exception stays as narrow as the single feature
+ * that needs it.
+ */
+const TURNSTILE_ORIGIN = "https://challenges.cloudflare.com";
 const contentSecurityPolicy = [
   "default-src 'self'",
   "base-uri 'self'",
   "object-src 'none'",
   "frame-ancestors 'none'",
   "form-action 'self' https://checkout.razorpay.com",
-  "img-src 'self' data: blob: https://res.cloudinary.com https://img.clerk.com https://*.razorpay.com",
+  "img-src 'self' data: blob: https://res.cloudinary.com https://img.clerk.com https://*.razorpay.com " + TURNSTILE_ORIGIN,
   "font-src 'self' data:",
   "style-src 'self' 'unsafe-inline' https://*.clerk.com https://*.clerk.accounts.dev",
-  `script-src 'self' 'unsafe-inline' https://checkout.razorpay.com https://*.clerk.com https://*.clerk.accounts.dev${isProduction ? "" : " 'unsafe-eval'"}`,
-  "connect-src 'self' https://api.razorpay.com https://*.razorpay.com wss://*.razorpay.com https://*.clerk.com https://*.clerk.accounts.dev",
-  "frame-src 'self' https://checkout.razorpay.com https://api.razorpay.com https://*.clerk.com https://*.clerk.accounts.dev",
+  `script-src 'self' 'unsafe-inline' https://checkout.razorpay.com https://*.clerk.com https://*.clerk.accounts.dev ${TURNSTILE_ORIGIN}${isProduction ? "" : " 'unsafe-eval'"}`,
+  "connect-src 'self' https://api.razorpay.com https://*.razorpay.com wss://*.razorpay.com https://*.clerk.com https://*.clerk.accounts.dev " + TURNSTILE_ORIGIN,
+  "frame-src 'self' https://checkout.razorpay.com https://api.razorpay.com https://*.clerk.com https://*.clerk.accounts.dev " + TURNSTILE_ORIGIN,
   "worker-src 'self' blob:",
   "manifest-src 'self'",
   ...(isProduction ? ["upgrade-insecure-requests"] : []),

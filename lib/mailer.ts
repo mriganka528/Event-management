@@ -197,6 +197,13 @@ const OTP_COPY: Record<string, { title: string; lead: string }> = {
   EMAIL_VERIFY: { title: "Confirm your email address", lead: "Enter this code to activate your account." },
   PHONE_VERIFY: { title: "Confirm your phone number", lead: "Enter this code to confirm this number belongs to you." },
   PASSWORD_RESET: { title: "Reset your password", lead: "Enter this code to choose a new password." },
+  /**
+   * The signed-in "change my password" flow reuses `OtpPurpose.PASSWORD_RESET`
+   * because it is the same operation with the same bar, but the wording differs:
+   * telling somebody who is deliberately changing their password to "reset" it
+   * makes a legitimate action look like an attack.
+   */
+  PASSWORD_CHANGE: { title: "Confirm your new password", lead: "Enter this code to finish changing your password." },
 };
 
 /** Generic one-time-code email. The code is the only thing the user must read. */

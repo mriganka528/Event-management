@@ -1,11 +1,12 @@
 "use client";
 
 import { useActionState, useEffect, useState } from "react";
-import { Eye, EyeOff, Loader2, UserCheck } from "lucide-react";
+import { Loader2, UserCheck } from "lucide-react";
 import { activateAccountAction } from "@/lib/auth-actions";
 import { AuthFeedback, IDLE_AUTH_STATE, nextRoute } from "@/components/auth/auth-feedback";
+import { useAuthToast } from "@/components/auth/auth-toast";
 import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
+import { PasswordInput } from "@/components/ui/password-input";
 import { FieldError } from "@/components/auth/field-error";
 
 /**
@@ -17,10 +18,14 @@ import { FieldError } from "@/components/auth/field-error";
  */
 export function ActivateForm({ token, email }: { token: string; email: string }) {
   const [state, formAction, pending] = useActionState(activateAccountAction, IDLE_AUTH_STATE);
-  const [show, setShow] = useState(false);
+  // Both fields are controlled so a rejected password survives: React resets an
+  // uncontrolled form when the action settles, and a member who mistypes one
+  // character of a twelve-character password would otherwise start over.
   const [password, setPassword] = useState("");
+  const [confirmPassword, setConfirmPassword] = useState("");
   const errors = state.fieldErrors ?? {};
 
+  useAuthToast(state);
   useEffect(() => {
     const next = nextRoute(state);
     if (next) window.location.assign(next);
@@ -36,40 +41,33 @@ export function ActivateForm({ token, email }: { token: string; email: string })
 
       <label className="grid gap-2 text-sm font-medium">
         New password
-        <span className="relative block">
-          <Input
-            name="password"
-            type={show ? "text" : "password"}
-            required
-            autoComplete="new-password"
-            className="pr-11"
-            value={password}
-            onChange={(event) => setPassword(event.target.value)}
-          />
-          <button
-            type="button"
-            onClick={() => setShow((current) => !current)}
-            className="absolute inset-y-0 right-0 flex w-11 items-center justify-center text-[var(--muted)] hover:text-[var(--foreground)]"
-            aria-label={show ? "Hide password" : "Show password"}
-            tabIndex={-1}
-          >
-            {show ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
-          </button>
-        </span>
+        <PasswordInput
+          name="password"
+          required
+          autoComplete="new-password"
+          value={password}
+          onChange={(event) => setPassword(event.target.value)}
+        />
         <span className="text-xs text-[var(--muted)]">At least 12 characters with upper case, lower case, a number, and a symbol.</span>
         <FieldError message={errors.password} />
       </label>
 
       <label className="grid gap-2 text-sm font-medium">
         Confirm password
-        <Input name="confirmPassword" type={show ? "text" : "password"} required autoComplete="new-password" />
+        <PasswordInput
+          name="confirmPassword"
+          autoComplete="new-password"
+          required
+          value={confirmPassword}
+          onChange={(event) => setConfirmPassword(event.target.value)}
+        />
         <FieldError message={errors.confirmPassword} />
       </label>
 
       <AuthFeedback state={state} />
 
       <Button type="submit" disabled={pending}>
-        {pending ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <UserCheck className="mr-2 h-4 w-4" />}
+        {pending ? <Loader2 className="mr-2 h-4 w-4 animate-spin" aria-hidden="true" /> : <UserCheck className="mr-2 h-4 w-4" aria-hidden="true" />}
         Set password and continue
       </Button>
     </form>

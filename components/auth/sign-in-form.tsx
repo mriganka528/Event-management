@@ -1,11 +1,13 @@
 "use client";
 
 import { useActionState, useEffect, useState } from "react";
-import { Eye, EyeOff, Loader2, Lock, LogIn, ShieldCheck } from "lucide-react";
+import { Loader2, Lock, LogIn, ShieldCheck } from "lucide-react";
 import { beginSignInAction } from "@/lib/auth-actions";
 import { AuthFeedback, IDLE_AUTH_STATE, nextRoute, type AuthActionState } from "@/components/auth/auth-feedback";
+import { useAuthToast } from "@/components/auth/auth-toast";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { PasswordInput } from "@/components/ui/password-input";
 import { Checkbox } from "@/components/ui/checkbox";
 
 const initialState: AuthActionState = IDLE_AUTH_STATE;
@@ -22,9 +24,9 @@ const initialState: AuthActionState = IDLE_AUTH_STATE;
  */
 export function SignInForm({ returnTo }: { returnTo?: string }) {
   const [state, formAction, pending] = useActionState(beginSignInAction, initialState);
-  const [showPassword, setShowPassword] = useState(false);
   const [email, setEmail] = useState("");
 
+  useAuthToast(state);
   useEffect(() => {
     const next = nextRoute(state);
     if (next) window.location.assign(next);
@@ -51,25 +53,7 @@ export function SignInForm({ returnTo }: { returnTo?: string }) {
 
       <label className="grid gap-2 text-sm font-medium">
         Password
-        <span className="relative block">
-          <Input
-            name="password"
-            type={showPassword ? "text" : "password"}
-            autoComplete="current-password"
-            required
-            className="pr-11"
-            placeholder="Your password"
-          />
-          <button
-            type="button"
-            onClick={() => setShowPassword((current) => !current)}
-            className="absolute inset-y-0 right-0 flex w-11 items-center justify-center text-[var(--muted)] hover:text-[var(--foreground)]"
-            aria-label={showPassword ? "Hide password" : "Show password"}
-            tabIndex={-1}
-          >
-            {showPassword ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
-          </button>
-        </span>
+        <PasswordInput name="password" autoComplete="current-password" required placeholder="Your password" />
       </label>
 
       <div className="flex items-center justify-between gap-3">

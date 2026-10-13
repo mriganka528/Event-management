@@ -4,6 +4,7 @@ import { useActionState, useEffect, useState } from "react";
 import { ArrowRight, KeyRound, Loader2, RefreshCw } from "lucide-react";
 import { completeSignInAction, resendTwoFactorAction } from "@/lib/auth-actions";
 import { AuthFeedback, IDLE_AUTH_STATE, nextRoute } from "@/components/auth/auth-feedback";
+import { useAuthToast } from "@/components/auth/auth-toast";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 
@@ -17,6 +18,8 @@ export function TwoFactorForm({ channel, returnTo }: { channel: "email" | "phone
   const [resendState, resendAction, resending] = useActionState(resendTwoFactorAction, IDLE_AUTH_STATE);
   const [code, setCode] = useState("");
 
+  useAuthToast(state);
+  useAuthToast(resendState);
   useEffect(() => {
     const next = nextRoute(state);
     if (next) window.location.assign(next);

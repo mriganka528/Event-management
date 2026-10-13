@@ -1,6 +1,8 @@
-import { KeyRound, MailCheck, ShieldCheck } from "lucide-react";
+import Link from "next/link";
+import { KeyRound, LifeBuoy, MailCheck, ShieldCheck } from "lucide-react";
 import { getAuthContext } from "@/lib/auth/server";
 import { CredentialsForm } from "@/components/auth/credentials-form";
+import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 
 export const dynamic = "force-dynamic";
@@ -9,8 +11,9 @@ export const dynamic = "force-dynamic";
  * Self-service credential management.
  *
  * Only reachable with a live session, and the admin layout has already decided
- * the caller may be here. The form itself re-checks the current password, so
- * this screen is a convenience rather than the security boundary.
+ * the caller may be here. Both forms re-check the current password, and each one
+ * then requires a code sent to an address the account owns, so this screen is a
+ * convenience rather than the security boundary.
  */
 export default async function AdminCredentialsPage() {
   const context = await getAuthContext();
@@ -24,8 +27,8 @@ export default async function AdminCredentialsPage() {
         <p className="text-sm font-semibold uppercase tracking-[0.25em] text-amber-700">Account</p>
         <h1 className="mt-2 text-4xl font-semibold tracking-tight sm:text-5xl">Your credentials.</h1>
         <p className="mt-3 max-w-2xl text-[var(--muted)]">
-          Change the email address you sign in with, or replace your password. Both require your current password, and
-          every change is written to the security log.
+          Change the email address you sign in with, or replace your password. Both start with your current password, both
+          are confirmed by a code sent to an address you control, and every change is written to the security log.
         </p>
       </section>
 
@@ -47,6 +50,21 @@ export default async function AdminCredentialsPage() {
             Your two-factor setting is unchanged, so codes keep arriving at whichever address or phone you have
             enrolled.
           </p>
+        </CardContent>
+      </Card>
+
+      <Card>
+        <CardContent className="flex flex-col gap-4 pt-6 sm:flex-row sm:items-center sm:justify-between">
+          <p className="flex items-start gap-2 text-sm text-[var(--muted)]">
+            <LifeBuoy className="mt-0.5 h-4 w-4 shrink-0 text-[var(--brand-dark)]" />
+            <span>
+              <span className="font-semibold text-[var(--foreground)]">Password forgotten?</span> You can reset it with a
+              code sent to your current email address, without needing the old password.
+            </span>
+          </p>
+          <Link href="/forgot-password" className="shrink-0">
+            <Button variant="outline">Reset with a code</Button>
+          </Link>
         </CardContent>
       </Card>
     </main>

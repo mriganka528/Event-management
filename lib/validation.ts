@@ -106,7 +106,22 @@ export const staffSchema = z.object({
   staffType: z.nativeEnum(StaffType),
 }).strict();
 
-export const staffUpdateSchema = z.object({ id: idSchema, isAvailable: z.boolean() }).strict();
+/**
+ * `staffType` is optional because the availability toggle and the role selector
+ * are posted by different forms. When it is present it must be a real
+ * `StaffType`; the enum is re-checked here rather than trusted from the form so
+ * a hand-crafted request cannot set an arbitrary string.
+ */
+export const staffUpdateSchema = z
+  .object({
+    id: idSchema,
+    isAvailable: z.boolean().optional(),
+    staffType: z.nativeEnum(StaffType).optional(),
+  })
+  .strict()
+  .refine((value) => value.isAvailable !== undefined || value.staffType !== undefined, {
+    message: "Nothing to update.",
+  });
 
 export const adminRequestSchema = z.object({
   firstName: requiredText(2, 80, "First name is required."),

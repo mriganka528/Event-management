@@ -2,6 +2,7 @@ import type { Metadata } from "next";
 import Link from "next/link";
 import { TentTree } from "lucide-react";
 import { AccountMenu } from "@/components/auth/account-menu";
+import { ThemeToggle } from "@/components/marketing/theme-toggle";
 import { formatRoleLabel } from "@/lib/role-label";
 import { getAuthContext } from "@/lib/auth/server";
 
@@ -18,22 +19,29 @@ export default async function StaffLayout({ children }: Readonly<{ children: Rea
   return (
     <div className="min-h-screen">
       <header className="border-b border-[var(--line)] bg-[var(--card)]">
-        <div className="container-shell flex items-center justify-between gap-4 py-4">
+        {/* `flex-wrap` because the header now carries a theme control as well as
+            the account menu, which no longer fit on one line on a phone. */}
+        <div className="container-shell flex flex-wrap items-center justify-between gap-3 py-4">
           <Link href="/staff" className="flex items-center gap-2 font-semibold">
             <span className="rounded-2xl bg-[var(--brand-soft)] p-2 text-[var(--brand-dark)]"><TentTree className="h-5 w-5" /></span>
             Staff workspace
           </Link>
-          {context.user ? (
-            <AccountMenu
-              compact
-              name={[context.user.firstName, context.user.lastName].filter(Boolean).join(" ")}
-              roleLabel={formatRoleLabel(context.user.role)}
-            />
-          ) : (
-            <Link href="/sign-in" className="rounded-full border border-[var(--line)] px-4 py-2 text-sm font-medium transition hover:bg-[var(--surface-muted)]">
-              Sign in
-            </Link>
-          )}
+          <div className="flex flex-wrap items-center gap-2">
+            {context.user ? (
+              <AccountMenu
+                compact
+                name={[context.user.firstName, context.user.lastName].filter(Boolean).join(" ")}
+                roleLabel={formatRoleLabel(context.user.role)}
+              />
+            ) : (
+              <Link href="/auth-choice" className="rounded-full border border-[var(--line)] px-4 py-2 text-sm font-medium transition hover:bg-[var(--surface-muted)]">
+                Sign in
+              </Link>
+            )}
+            {/* Scoped to the staff area; independent of the customer and admin
+                preferences. */}
+            <ThemeToggle />
+          </div>
         </div>
       </header>
       <main className="container-shell py-8 md:py-12">{children}</main>

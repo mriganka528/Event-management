@@ -18,7 +18,6 @@ and real-time updates.
 
 ```bash
 npm install
-cp .env.example .env.local
 npm run prisma:generate
 npm run db:migrate
 npm run db:seed
@@ -35,7 +34,7 @@ screen on first sign-in.
 
 ## Environment variables
 
-See `.env.example` for the full list. The ones without a sensible default:
+Configure these in `.env.local` or your platform's environment settings. The ones without a sensible default:
 
 | Variable | Purpose |
 | --- | --- |

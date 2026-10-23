@@ -1,7 +1,7 @@
 import type { Metadata } from "next";
 import Link from "next/link";
 import { CalendarDays } from "lucide-react";
-import { AccountMenu } from "@/components/auth/account-menu";
+import { AccountMenu, type AccountMenuLink } from "@/components/auth/account-menu";
 import { ThemeToggle } from "@/components/marketing/theme-toggle";
 import { BusinessLogo } from "@/components/layout/business-logo";
 import { WorkspaceHeader } from "@/components/layout/workspace-header";
@@ -11,6 +11,12 @@ import { getBusinessSettings } from "@/lib/settings";
 
 export const dynamic = "force-dynamic";
 export const metadata: Metadata = { title: { default: "Staff workspace", template: "%s | Staff workspace" }, robots: { index: false, follow: false, nocache: true } };
+
+/** Shortcuts in the account menu, kept as serializable data for the client menu. */
+const STAFF_ACCOUNT_LINKS: readonly AccountMenuLink[] = [
+  { href: "/staff", label: "My shifts", description: "Your event-day schedule", icon: "calendar" },
+  { href: "/", label: "Public website", description: "Packages, services, and contact", icon: "home" },
+];
 
 /**
  * Chrome only. Authorization lives in the individual pages so an invited member
@@ -23,8 +29,10 @@ export default async function StaffLayout({ children }: Readonly<{ children: Rea
 
   return (
     <div className="min-h-screen">
-      <header className="sticky top-0 z-30 border-b border-[var(--line)] bg-[var(--card)]">
-        <div className="container-shell relative py-3">
+      {/* Matches the public site's floating header: the sticky element keeps
+          the page gutter, and the glass pill inside it is the visible bar. */}
+      <header className="container-shell sticky top-3 z-40 pt-3 sm:top-4 sm:pt-4">
+        <div className="glass-panel relative rounded-3xl border border-[var(--line)] px-3 py-2.5 shadow-sm sm:rounded-full sm:px-5 sm:py-3">
           <WorkspaceHeader
             brand={
               <Link href="/staff" className="min-w-0" aria-label={`${businessName} staff workspace`}>
@@ -65,22 +73,20 @@ export default async function StaffLayout({ children }: Readonly<{ children: Rea
               <ThemeToggle />
             }
             menu={
-              <div className="flex flex-col items-stretch gap-3 sm:flex-row sm:items-center sm:gap-2">
-                {context.user ? (
-                  <AccountMenu
-                    compact
-                    name={[context.user.firstName, context.user.lastName].filter(Boolean).join(" ")}
-                    roleLabel={formatRoleLabel(context.user.role)}
-                  />
-                ) : (
-                  <Link
-                    href="/auth-choice"
-                    className="inline-flex h-10 items-center justify-center rounded-full border border-[var(--line)] px-4 text-sm font-medium transition hover:bg-[var(--surface-muted)]"
-                  >
-                    Sign in
-                  </Link>
-                )}
-              </div>
+              context.user ? (
+                <AccountMenu
+                  name={[context.user.firstName, context.user.lastName].filter(Boolean).join(" ")}
+                  roleLabel={formatRoleLabel(context.user.role)}
+                  links={STAFF_ACCOUNT_LINKS}
+                />
+              ) : (
+                <Link
+                  href="/auth-choice"
+                  className="inline-flex h-10 w-full items-center justify-center rounded-full border border-[var(--line)] px-4 text-sm font-medium transition hover:bg-[var(--surface-muted)] sm:w-auto"
+                >
+                  Sign in
+                </Link>
+              )
             }
           />
         </div>

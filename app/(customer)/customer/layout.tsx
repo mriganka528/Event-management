@@ -1,7 +1,7 @@
 import Link from "next/link";
 import { CalendarDays, PlusCircle } from "lucide-react";
 import { getBusinessSettings } from "@/lib/settings";
-import { AccountMenu } from "@/components/auth/account-menu";
+import { AccountMenu, type AccountMenuLink } from "@/components/auth/account-menu";
 import { ThemeToggle } from "@/components/marketing/theme-toggle";
 import { BusinessLogo } from "@/components/layout/business-logo";
 import { WorkspaceHeader } from "@/components/layout/workspace-header";
@@ -12,6 +12,14 @@ import { prisma } from "@/lib/prisma";
 import { toNotificationView } from "@/lib/notification-links";
 
 export const dynamic = "force-dynamic";
+
+/** Shortcuts in the account menu. `icon` is a name, not a component, so this
+ *  stays serializable when the server layout renders the client menu. */
+const CUSTOMER_ACCOUNT_LINKS: readonly AccountMenuLink[] = [
+  { href: "/customer/dashboard", label: "My dashboard", description: "Bookings, payments, and next steps", icon: "dashboard" },
+  { href: "/packages", label: "Browse packages", description: "Find a ready-made celebration", icon: "package" },
+  { href: "/contact", label: "Talk to the team", description: "Ask about dates or a custom plan", icon: "help" },
+];
 
 export default async function CustomerLayout({ children }: Readonly<{ children: React.ReactNode }>) {
   const settings = await getBusinessSettings();
@@ -36,8 +44,15 @@ export default async function CustomerLayout({ children }: Readonly<{ children: 
 
   return (
     <div className="min-h-screen">
-      <header className="sticky top-0 z-30 border-b border-[var(--line)] bg-[color:color-mix(in_srgb,var(--card)_88%,transparent)] backdrop-blur">
-        <div className="container-shell relative py-3">
+      {/*
+        The same floating, glass-panel bar as the public site: the header is
+        the container-shell itself, so it keeps the page gutter and stays 12px
+        off the top edge when it sticks. The bar inside it is the pill, which
+        means the mobile menu panel opens from the pill rather than from a
+        full-width strip.
+      */}
+      <header className="container-shell sticky top-3 z-40 pt-3 sm:top-4 sm:pt-4">
+        <div className="glass-panel relative rounded-3xl border border-[var(--line)] px-3 py-2.5 shadow-sm sm:rounded-full sm:px-5 sm:py-3">
           <WorkspaceHeader
             brand={
               <Link href="/" className="min-w-0" aria-label={`${businessName} home`}>
@@ -60,7 +75,7 @@ export default async function CustomerLayout({ children }: Readonly<{ children: 
               // bar at every width.
               <Link
                 href="/customer/bookings/new"
-                className="inline-flex h-10 shrink-0 items-center gap-2 rounded-full bg-amber-500 px-3 text-sm font-medium text-stone-950 transition hover:bg-amber-400 sm:px-4"
+                className="inline-flex h-10 shrink-0 items-center gap-2 rounded-full bg-amber-500 px-3 text-sm font-medium text-stone-950 shadow-sm shadow-amber-500/25 transition hover:bg-amber-400 sm:px-4"
               >
                 <PlusCircle className="h-4 w-4" />
                 <span className="hidden sm:inline">New booking</span>
@@ -80,24 +95,22 @@ export default async function CustomerLayout({ children }: Readonly<{ children: 
               <ThemeToggle />
             }
             menu={
-              <div className="flex flex-col items-stretch gap-3 sm:flex-row sm:items-center sm:gap-2">
-                {signedIn.user ? (
-                  <AccountMenu
-                    compact
-                    name={[signedIn.user.firstName, signedIn.user.lastName].filter(Boolean).join(" ")}
-                    roleLabel={formatRoleLabel(signedIn.user.role)}
-                  />
-                ) : (
-                  // Not `/sign-in`: that is the first-party staff password form,
-                  // which a customer has no credentials for. The chooser asks first.
-                  <Link
-                    href="/auth-choice"
-                    className="inline-flex h-10 items-center justify-center rounded-full border border-[var(--line)] px-4 text-sm font-medium transition hover:bg-[var(--surface-muted)]"
-                  >
-                    Sign in
-                  </Link>
-                )}
-              </div>
+              signedIn.user ? (
+                <AccountMenu
+                  name={[signedIn.user.firstName, signedIn.user.lastName].filter(Boolean).join(" ")}
+                  roleLabel={formatRoleLabel(signedIn.user.role)}
+                  links={CUSTOMER_ACCOUNT_LINKS}
+                />
+              ) : (
+                // Not `/sign-in`: that is the first-party staff password form,
+                // which a customer has no credentials for. The chooser asks first.
+                <Link
+                  href="/auth-choice"
+                  className="inline-flex h-10 w-full items-center justify-center rounded-full border border-[var(--line)] px-4 text-sm font-medium transition hover:bg-[var(--surface-muted)] sm:w-auto"
+                >
+                  Sign in
+                </Link>
+              )
             }
           />
         </div>

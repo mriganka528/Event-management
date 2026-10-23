@@ -2,7 +2,7 @@ import type { Metadata } from "next";
 import { cache } from "react";
 import Image from "next/image";
 import Link from "next/link";
-import { CalendarDays, Headphones, MapPin, Sparkles } from "lucide-react";
+import { Baby, Briefcase, CakeSlice, Gem, HeartHandshake, PartyPopper, Presentation, Sparkles } from "lucide-react";
 import { getBookingFormData } from "@/lib/bookings";
 import { prisma } from "@/lib/prisma";
 import { SiteHeader } from "@/components/layout/site-header";
@@ -58,11 +58,20 @@ export async function generateMetadata(): Promise<Metadata> {
   }
 }
 
+/**
+ * The occasions the business styles for. Kept as one list so the marketing
+ * cards stay in step with each other; adding an occasion is a single entry,
+ * not another hand-written block in the markup.
+ */
 const categories = [
-  { name: "Wedding", icon: Sparkles, description: "Thoughtful setup, decor, and guest experience for the day you have been planning." },
-  { name: "Birthday", icon: CalendarDays, description: "A memorable atmosphere with room for food, music, photos, and celebration." },
-  { name: "Corporate", icon: Headphones, description: "Reliable production and professional coordination for launches and company events." },
-  { name: "Party", icon: MapPin, description: "Flexible event layouts designed around your venue, guest count, and style." },
+  { name: "Wedding", icon: Sparkles, description: "Full-day styling, decor, and guest experience for the celebration you have been planning." },
+  { name: "Engagement", icon: Gem, description: "Intimate setups and beautiful details for the yes moment and the party after." },
+  { name: "Birthday", icon: CakeSlice, description: "Playful themes, food, music, and photo moments for every age." },
+  { name: "Anniversary", icon: HeartHandshake, description: "Warm, elegant settings for milestones shared with the people who matter." },
+  { name: "Baby Shower", icon: Baby, description: "Soft, joyful styling with comfortable layouts for family and friends." },
+  { name: "Corporate", icon: Briefcase, description: "Polished production for team days, launches, and client celebrations." },
+  { name: "Conference", icon: Presentation, description: "Clear layouts, presentation-ready staging, and smooth flow for speakers and delegates." },
+  { name: "Party", icon: PartyPopper, description: "Flexible layouts built around your venue, guest count, and style." },
 ];
 
 export default async function Home() {
@@ -157,7 +166,40 @@ export default async function Home() {
 
         <section id="categories" className="space-y-6 scroll-mt-28">
           <SectionHeading eyebrow="Event categories" title="Built for the events your team serves." />
-          <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">{categories.map(({ name, icon: Icon, description }) => <Card key={name} className="border-[var(--line)] bg-[var(--card)]"><CardContent className="space-y-4 p-6"><Icon className="h-8 w-8 text-amber-600" /><h3 className="text-2xl text-[var(--foreground)]">{name}</h3><p className="text-sm leading-7 text-[var(--muted)]">{description}</p></CardContent></Card>)}</div>
+          <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
+            {categories.map(({ name, icon: Icon, description }) => (
+              <Card
+                key={name}
+                className="group relative overflow-hidden border-[var(--line)] bg-[var(--card)] transition duration-300 hover:-translate-y-0.5 hover:border-[var(--brand)] hover:shadow-[0_18px_45px_rgba(53,41,26,0.12)] motion-reduce:transition-none motion-reduce:hover:translate-y-0"
+              >
+                {/* A soft wash that appears on hover, rather than a border alone:
+                    eight cards in a grid read more clearly when each one has a
+                    distinct surface state. */}
+                <div
+                  aria-hidden="true"
+                  className="pointer-events-none absolute -right-8 -top-8 h-24 w-24 rounded-full bg-[var(--brand-soft)] opacity-0 transition-opacity duration-300 group-hover:opacity-100 motion-reduce:transition-none"
+                />
+                <CardContent className="relative flex h-full flex-col gap-4 p-6">
+                  <span className="inline-flex h-11 w-11 items-center justify-center rounded-2xl bg-[var(--brand-soft)] text-[var(--brand-dark)] ring-1 ring-inset ring-[var(--brand)]/15">
+                    <Icon className="h-5 w-5" aria-hidden="true" />
+                  </span>
+                  <div className="space-y-2">
+                    <h3 className="text-xl font-semibold text-[var(--foreground)]">{name}</h3>
+                    <p className="text-sm leading-7 text-[var(--muted)]">{description}</p>
+                  </div>
+                </CardContent>
+              </Card>
+            ))}
+          </div>
+          <div className="flex flex-col gap-4 rounded-[28px] border border-dashed border-[var(--line-strong)] bg-[var(--brand-softer)] p-5 sm:flex-row sm:items-center sm:justify-between sm:p-6">
+            <div className="min-w-0">
+              <p className="font-semibold text-[var(--foreground)]">Planning something a little different?</p>
+              <p className="mt-1 text-sm text-[var(--muted)]">Tell us the occasion and we will shape a setup around it.</p>
+            </div>
+            <Link href="/customer/bookings/new" className="shrink-0">
+              <Button variant="outline" size="sm" className="w-full sm:w-auto">Start a custom request</Button>
+            </Link>
+          </div>
         </section>
 
         <section id="packages" className="space-y-6 scroll-mt-28"><SectionHeading eyebrow="Featured packaging" title="Package options that feel premium before the event even starts." />{packages.length === 0 ? <Card><CardContent className="p-8 text-center"><ShoppingBagIcon /><h3 className="mt-4 text-2xl font-semibold">Packages are being prepared</h3><p className="mx-auto mt-2 max-w-lg text-[var(--muted)]">Our team has not published a package yet. You can still send a custom service request.</p><Link href="/customer/bookings/new" className="mt-5 inline-block"><Button>Request a custom plan</Button></Link></CardContent></Card> : <PackageCarousel packages={packages} currency={currency} />}</section>

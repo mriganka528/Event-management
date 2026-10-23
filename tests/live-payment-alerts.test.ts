@@ -106,13 +106,31 @@ test("the admin notification centre announces every arrival once", () => {
   assert.match(centre, /for \(const item of fresh\) announce\(item\)/);
 });
 
-test("a deployment without a socket still receives payment alerts", () => {
-  // Vercel has no custom server, so the socket never connects there. Without a
-  // poll the alert would only arrive on the next full page refresh.
+test("a deployment without a custom server still receives payment alerts", () => {
+  // Vercel runs the Next.js request handlers, not server.mjs, so Socket.IO never
+  // connects there. The live path is the SSE route, with the focused poll as a
+  // fallback for a blocked stream.
+  assert.match(centre, /new EventSource\("\/api\/realtime"\)/);
+  assert.match(centre, /addEventListener\("notifications"/);
   assert.match(centre, /\/api\/admin\/notifications/);
   assert.match(centre, /window\.setInterval\(poll, 10_000\)/);
+
+  const stream = readFileSync("app/api/realtime/route.ts", "utf8");
+  assert.match(stream, /text\/event-stream/);
+  assert.match(stream, /requireApiUser/);
+  assert.match(stream, /toNotificationView\(notification, audienceLabel\)/);
+  assert.match(stream, /maxDuration = 300/);
+
   assert.match(readFileSync("app/api/admin/notifications/route.ts", "utf8"), /requireApiAdmin/);
   assert.match(readFileSync("app/api/customer/notifications/route.ts", "utf8"), /requireApiCustomer/);
+});
+
+test("the browser does not depend on the custom Socket.IO server", () => {
+  // The custom server is still useful for a long-lived Node deployment, but the
+  // client must not require it. Otherwise every Vercel tab retries a socket that
+  // is not deployed and the indicator sits on "Offline".
+  assert.doesNotMatch(centre, /socket\.io-client/);
+  assert.doesNotMatch(readFileSync("components/customer/notification-listener.tsx", "utf8"), /socket\.io-client/);
 });
 
 test("the customer is told the moment their payment lands", () => {
@@ -123,10 +141,11 @@ test("the customer is told the moment their payment lands", () => {
   const listener = readFileSync("components/customer/notification-listener.tsx", "utf8");
   assert.match(listener, /announceNotification\(/, "a customer's own notification must be announced");
   assert.match(listener, /\/api\/customer\/notifications/);
+  assert.match(listener, /new EventSource\("\/api\/realtime"\)/);
   assert.match(listener, /window\.setInterval\(/);
-  // The socket handshake takes a moment, so a notification created during it
-  // was never pushed and has to be fetched.
-  assert.match(listener, /socket\.on\("connect"[\s\S]*catchUp\(\)/);
+  // The stream handshake takes a moment, so a notification created during it
+  // has to be fetched.
+  assert.match(listener, /source\.onopen[\s\S]*catchUp\(\)/);
 
   const layout = readFileSync("app/(customer)/customer/layout.tsx", "utf8");
   assert.match(layout, /CustomerNotificationListener/);

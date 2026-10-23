@@ -14,10 +14,13 @@ import type { NotificationView } from "@/lib/notification-links";
  * they are created: the in-page popup, the chime, and the operating system's
  * notification.
  *
- * The socket is the fast path. A serverless deployment has none, so a poll of
- * the customer's own notification feed covers that case. Either way the
- * arrival is announced exactly once, because the ids already seen are
- * remembered.
+ * Server-Sent Events are the live path. The old Socket.IO connection only
+ * existed in the custom server, so it could never connect on a serverless
+ * deployment. The stream works in both places, carries the session cookie, and
+ * reconnects automatically. A poll of the customer's own notification feed is
+ * still kept as a fallback for browsers or networks where the stream is
+ * blocked. Either way the arrival is announced exactly once, because the ids
+ * already seen are remembered.
  *
  * `initialItems` are the notifications the page was rendered with. They are
  * what has already happened, so they are recorded as seen and never
@@ -34,8 +37,9 @@ export function CustomerNotificationListener({ initialItems }: { initialItems: N
 
   useEffect(() => {
     let disposed = false;
-    let socket: import("socket.io-client").Socket | null = null;
     let live = false;
+    let source: EventSource | null = null;
+    let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
 
     function announce(item: NotificationView) {
       const known = seen.current ?? new Set<string>();
@@ -48,10 +52,9 @@ export function CustomerNotificationListener({ initialItems }: { initialItems: N
     /*
      * One read of the customer's own feed.
      *
-     * Used two ways: as the fallback when there is no socket, and as a
-     * catch-up right after the socket connects, because a notification created
-     * during the handshake was never pushed to a socket that did not exist
-     * yet.
+     * Used two ways: as the fallback when there is no stream, and as a
+     * catch-up right after the stream opens, because a notification created
+     * during the handshake may not have been in the first snapshot.
      */
     async function catchUp() {
       try {
@@ -68,38 +71,52 @@ export function CustomerNotificationListener({ initialItems }: { initialItems: N
       }
     }
 
-    async function connect() {
-      const { io } = await import("socket.io-client");
+    function connect() {
       if (disposed) return;
-      socket = io({
-        path: "/api/socket.io",
-        withCredentials: true,
-        transports: ["websocket", "polling"],
-        reconnectionAttempts: 3,
-        reconnectionDelay: 2000,
-        timeout: 8000,
-      });
-      socket.on("connect", () => {
+      if (typeof EventSource === "undefined") return;
+
+      source = new EventSource("/api/realtime");
+
+      source.onopen = () => {
         live = true;
-        // The handshake took a moment, so anything created during it was
-        // never pushed. This closes that gap.
+        // The handshake took a moment, so anything created during it may not
+        // have been in the first snapshot. This closes that gap.
         void catchUp();
+      };
+
+      source.addEventListener("notifications", (event) => {
+        try {
+          const payload = JSON.parse((event as MessageEvent).data) as { items?: NotificationView[] };
+          if (!Array.isArray(payload.items)) return;
+          for (const item of payload.items) announce(item);
+        } catch {
+          // A malformed frame is not worth an error popup; the polling
+          // fallback and the next snapshot still deliver the list.
+        }
       });
-      socket.on("disconnect", () => {
+
+      source.onerror = () => {
         live = false;
-      });
-      socket.on("realtime:event", (event: { type?: string; notification?: NotificationView }) => {
-        const incoming = event?.notification;
-        if (incoming) announce(incoming);
-      });
+        if (disposed || !source) return;
+
+        if (source.readyState === EventSource.CLOSED) {
+          // A refused handshake or an unsupported endpoint closes for good.
+          // Keep polling and try the stream again later.
+          source.close();
+          source = null;
+          if (reconnectTimer) clearTimeout(reconnectTimer);
+          reconnectTimer = setTimeout(connect, 30_000);
+        }
+      };
     }
 
-    void connect();
+    connect();
 
     /*
-     * The fallback for a deployment with no socket server. It asks for the
-     * customer's own notifications rather than re-rendering the page, so a
-     * payment confirmation reaches them in seconds.
+     * The fallback for a deployment or network where the stream cannot stay
+     * open. It asks for the customer's own notifications rather than
+     * re-rendering the page, so a payment confirmation still reaches them in
+     * seconds.
      */
     const timer = window.setInterval(async () => {
       if (disposed || live) return;
@@ -108,8 +125,9 @@ export function CustomerNotificationListener({ initialItems }: { initialItems: N
 
     return () => {
       disposed = true;
+      if (reconnectTimer) clearTimeout(reconnectTimer);
       window.clearInterval(timer);
-      socket?.disconnect();
+      source?.close();
     };
   }, [router]);
 

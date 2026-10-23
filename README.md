@@ -85,7 +85,11 @@ The app is built for a Node-compatible serverless platform such as Vercel.
 Set the environment variables in the platform's dashboard, then deploy. Set
 `NEXT_PUBLIC_SITE_URL` to the public origin (for this deployment,
 `https://planora-sage-ten.vercel.app`). Locally it falls back to
-`http://localhost:3000`.
+`http://localhost:3000`. The server also accepts `SITE_URL` or `APP_URL`, and
+uses Vercel's `VERCEL_PROJECT_PRODUCTION_URL` when system environment variables
+are enabled, so email links use the deployment origin even if the public variable
+is missing. A bare host such as `planora-sage-ten.vercel.app` is accepted and
+given an `https://` scheme.
 
 Migrations use a direct database connection: `prisma.config.ts` picks
 `DIRECT_URL`, `DATABASE_URL_UNPOOLED`, or `POSTGRES_URL_NON_POOLING` when one is
@@ -96,9 +100,10 @@ production builds do not fail each other.
 
 Three things are worth checking before going live:
 
-- The live socket needs a long-lived Node process, so a serverless deployment
-  falls back to polling for new notifications. The rest of the application is
-  unaffected.
+- Live notifications use Server-Sent Events, so they work on both a long-lived
+  Node server and a serverless deployment such as Vercel. The browser falls back
+  to polling every ten seconds if the stream is blocked; it no longer depends on
+  the Socket.IO server in `server.mjs`, which a serverless platform does not run.
 - `SESSION_FINGERPRINT_SALT` must be set to a long random string. Without it
   the application still runs, but it logs a warning and forgets which devices
   are signed in whenever an instance restarts.

@@ -29,6 +29,7 @@ const customerNewBooking = readFileSync("app/(customer)/customer/bookings/new/pa
 const staffDashboard = readFileSync("app/(staff)/staff/page.tsx", "utf8");
 const staffLayout = readFileSync("app/(staff)/staff/layout.tsx", "utf8");
 const header = readFileSync("components/layout/workspace-header.tsx", "utf8");
+const accountMenu = readFileSync("components/auth/account-menu.tsx", "utf8");
 const logo = readFileSync("components/layout/business-logo.tsx", "utf8");
 
 test("a heading never runs past the edge of a phone screen", () => {
@@ -100,6 +101,47 @@ test("the account control moves behind a disclosure on a phone", () => {
   assert.match(header, /hidden sm:block/, "the account control is in the bar from `sm` up");
   assert.match(header, /sm:hidden/, "and behind the disclosure below it");
   assert.match(header, /Escape/, "the disclosure must close on Escape");
+});
+
+test("the account control is a real popover on wider screens", () => {
+  /*
+   * The old chip put the avatar, the name, and a sign-out button directly in
+   * the bar. That worked on a laptop but left no room for the account links a
+   * customer or staff member needs, and it had no keyboard story at all.
+   */
+  assert.match(accountMenu, /aria-haspopup="dialog"/, "the account trigger must announce what it opens");
+  assert.match(accountMenu, /aria-expanded=\{open\}/, "the trigger must say whether the popover is open");
+  assert.match(accountMenu, /aria-controls=\{panelId\}/, "the trigger must point at the popover");
+  assert.match(accountMenu, /role="dialog"/, "the popover needs a role and a name");
+  assert.match(accountMenu, /addEventListener\("pointerdown"/, "a click outside must close the popover");
+  assert.match(accountMenu, /event\.key !== "Escape"/, "Escape must close the popover");
+});
+
+test("the phone disclosure scrolls instead of running off a short screen", () => {
+  assert.match(header, /overflow-y-auto/, "the panel needs its own scroll container");
+  assert.match(header, /max-h-\[min\(34rem,calc\(100dvh-5\.5rem\)\)\]/, "and a height bounded by the viewport");
+  // The backdrop is for catching outside clicks, not for painting a band over
+  // the floating bar or the page. It must stay transparent, like the public
+  // header's mobile menu.
+  assert.match(header, /bg-transparent/, "the click-catching backdrop must be transparent");
+  assert.doesNotMatch(header, /bg-stone-950/, "opening the menu must not tint the page");
+  assert.doesNotMatch(header, /backdrop-blur/, "and it must not blur the page either");
+  assert.match(header, /aria-modal="true"/, "the panel is the only thing to interact with while open");
+});
+
+test("the workspace bars float like the public header", () => {
+  // A full-width strip pinned to the top read as admin chrome. The public site
+  // already had a floating glass pill; the customer and staff areas use the
+  // same shape so moving between the marketing site and a workspace feels like
+  // the same product.
+  for (const [file, source] of [
+    ["customer layout", customerLayout],
+    ["staff layout", staffLayout],
+  ] as const) {
+    assert.match(source, /className="container-shell sticky top-3 z-40 pt-3 sm:top-4 sm:pt-4"/, `${file} must use the floating sticky shell`);
+    assert.match(source, /glass-panel/, `${file} must use the shared glass surface`);
+    assert.match(source, /rounded-3xl[^"]*sm:rounded-full/, `${file} must be a rounded bar`);
+  }
 });
 
 test("both workspaces use the same bar", () => {

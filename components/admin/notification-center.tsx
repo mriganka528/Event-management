@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useRef, useState, useTransition } from "react";
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
-import { Bell, CheckCheck, Radio, Settings2, Volume2, VolumeX, WifiOff, X } from "lucide-react";
+import { Bell, CheckCheck, Radio, RefreshCw, Settings2, Volume2, VolumeX, WifiOff, X } from "lucide-react";
 import { toast } from "react-hot-toast";
 import { markAllNotificationsFormAction, markNotificationsSeenAction } from "@/lib/form-actions";
 import { isNotificationSoundEnabled, playNotificationSound, setNotificationSoundEnabled, unlockNotificationSound } from "@/lib/notification-sound";
@@ -14,15 +14,16 @@ import type { NotificationView } from "@/lib/notification-links";
 const BROWSER_KEY = "staff-browser-notifications";
 
 /**
- * The live-connection indicator, as three distinct states rather than a boolean.
+ * The live-connection indicator, as distinct states rather than a boolean.
  *
  * A boolean collapses "still trying" and "refused" into one word, and the previous
  * version printed "Connecting" for both. A handshake the server rejects never
  * resolves, so a broken connection looked permanently in progress instead of
- * looking broken, and there was nothing on screen to act on.
+ * looking broken, and there was nothing on screen to act on. The "polling"
+ * state is the fallback: notifications still arrive, just without a stream.
  */
 type LiveState = {
-  status: "connecting" | "live" | "offline";
+  status: "connecting" | "live" | "polling" | "offline";
   /** Why it is not live, when the server or the network said so. */
   reason?: string;
 };
@@ -30,6 +31,7 @@ type LiveState = {
 const LIVE_LABEL: Record<LiveState["status"], string> = {
   connecting: "Connecting",
   live: "Live",
+  polling: "Polling",
   offline: "Offline",
 };
 
@@ -70,7 +72,6 @@ export function AdminNotificationCenter({ initialItems, initialUnread }: { initi
   const [permission, setPermission] = useState<NotificationPermission | "unsupported">("default");
   const [soundOn, setSoundOn] = useState(true);
   const [, startTransition] = useTransition();
-  const refreshTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   // The ids already announced, so a notification is only ever announced once.
   // The first render is not an arrival: the list is what the page loaded with,
   // so announcing it would greet the reader with a chime for something that
@@ -129,9 +130,9 @@ export function AdminNotificationCenter({ initialItems, initialUnread }: { initi
   /**
    * One arrival path for every channel.
    *
-   * The socket is the fast path, but a serverless deployment has none and its
-   * polling fallback delivers the same notification as a changed prop. Both
-   * call this, so neither can lose the in-page popup, chime, or browser alert.
+   * The SSE stream is the fast path, and the focused poll covers a deployment
+   * or network where the stream is blocked. Both call this, so neither can
+   * lose the in-page popup, chime, or browser alert.
    */
   const announce = useCallback(
     (item: NotificationView) => {
@@ -143,9 +144,9 @@ export function AdminNotificationCenter({ initialItems, initialUnread }: { initi
   /**
    * Applies a list of notifications that came from the server.
    *
-   * The same list arrives by two routes: as changed props when the page
-   * re-renders, and as the answer of the polling fallback on a deployment with
-   * no socket server. Both go through here, and anything that has not been
+   * The same list arrives by three routes: as changed props when the page
+   * re-renders, as a snapshot from the live SSE stream, and as the answer of
+   * the polling fallback. All go through here, and anything that has not been
    * announced yet is announced once, whichever route delivered it.
    */
   const applyServerList = useCallback(
@@ -165,10 +166,10 @@ export function AdminNotificationCenter({ initialItems, initialUnread }: { initi
     /*
      * Announce anything that arrived since the last render.
      *
-     * The socket is the fast path, but a deployment without the custom server
-     * has none, and its polling fallback delivers the list instead. Either way
-     * the new notification arrives here as a changed prop, so the sound and
-     * the popup are raised from one place rather than two.
+     * The SSE stream is the fast path, and the focused poll covers a blocked
+     * stream. Either way a new notification also arrives here as a changed
+     * prop, so the sound and the popup are raised from one place rather than
+     * two.
      */
     applyServerList(initialItems, initialUnread);
     // `applyServerList` is stable, and `items` is deliberately not a
@@ -176,103 +177,96 @@ export function AdminNotificationCenter({ initialItems, initialUnread }: { initi
   }, [initialItems, initialUnread, applyServerList]);
 
   useEffect(() => {
-    // Authentication rides on the HttpOnly session cookie, which the browser
-    // sends on the same-origin socket handshake. The server verifies the token
-    // hash against the database before joining any room, so no token is ever
-    // exposed to client JavaScript.
+    /*
+     * Server-Sent Events are the live path in both local development and on
+     * Vercel. The old Socket.IO connection only existed in the custom server,
+     * so a serverless deployment spent the whole session trying to reach a
+     * socket that was never deployed.
+     *
+     * The browser sends the HttpOnly session cookie with this same-origin GET,
+     * and the route authenticates it before opening the stream. No token ever
+     * reaches client JavaScript.
+     */
     let disposed = false;
-    let socket: import("socket.io-client").Socket | null = null;
-    let refreshSoon = false;
+    let source: EventSource | null = null;
+    let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
 
-    async function connect() {
-      const { io } = await import("socket.io-client");
+    function connect() {
       if (disposed) return;
-      socket = io({
-        path: "/api/socket.io",
-        withCredentials: true,
-        transports: ["websocket", "polling"],
-        // A deployment without the custom server has no socket to reach, and
-        // the default is to retry forever. The polling fallback below covers
-        // that case, so the attempts stop instead of repeating all session.
-        reconnectionAttempts: 3,
-        reconnectionDelay: 2000,
-        timeout: 8000,
-      });
-      socket.on("connect", () => {
+      if (typeof EventSource === "undefined") {
+        liveRef.current = "polling";
+        setLive({ status: "polling", reason: "This browser does not support live updates." });
+        return;
+      }
+
+      source = new EventSource("/api/realtime");
+
+      source.onopen = () => {
         liveRef.current = "live";
         setLive({ status: "live" });
-      });
-      socket.on("disconnect", (reason: string) => {
-        liveRef.current = "offline";
-        setLive({
-          status: "offline",
-          reason: reason === "io server disconnect" ? "The server closed the connection." : undefined,
-        });
-      });
-      socket.on("connect_error", (error: Error) => {
-        // Surfaced in the tooltip. A refused handshake says why here, which is the
-        // difference between a network problem and a session that has expired.
-        liveRef.current = "offline";
-        setLive({ status: "offline", reason: error?.message });
-      });
-      socket.on("realtime:event", (event: { type?: string; notification?: NotificationView }) => {
-        const incoming = event?.notification;
-        if (incoming) {
-          /*
-           * Recorded as already announced before the refresh.
-           *
-           * The popup and chime are raised from this one place. The refresh
-           * below then delivers the same notification again as a changed prop,
-           * and without this the reader would hear the chime twice for one
-           * notification.
-           */
-          const isNew = !announced.current?.has(incoming.id);
-          announced.current?.add(incoming.id);
-          if (isNew) {
-            setItems((current) => [{ ...incoming }, ...current.filter((item) => item.id !== incoming.id)].slice(0, 30));
-            setUnread((count) => count + 1);
-            announce(incoming);
-          }
+      };
+
+      source.addEventListener("notifications", (event) => {
+        try {
+          const payload = JSON.parse((event as MessageEvent).data) as { items?: NotificationView[]; unread?: number };
+          if (!Array.isArray(payload.items)) return;
+          const unread = typeof payload.unread === "number" ? payload.unread : payload.items.filter((item) => !item.read).length;
+          applyServerList(payload.items, unread);
+        } catch {
+          // A malformed frame is not worth an error popup; the next snapshot
+          // and the polling fallback still deliver the list.
         }
-        if (refreshSoon) return;
-        refreshSoon = true;
-        if (refreshTimer.current) clearTimeout(refreshTimer.current);
-        refreshTimer.current = setTimeout(() => {
-          refreshSoon = false;
-          router.refresh();
-        }, 150);
       });
+
+      source.onerror = () => {
+        if (disposed || !source) return;
+        if (source.readyState === EventSource.CONNECTING) {
+          // EventSource reconnects on its own after a network drop or a
+          // serverless function reaching its maximum duration.
+          liveRef.current = "connecting";
+          setLive({ status: "connecting", reason: "Reconnecting to live updates." });
+          return;
+        }
+
+        // A refused handshake (expired session, wrong account type) closes for
+        // good. Keep the polling fallback running and retry the stream later so
+        // a transient failure does not leave the badge offline until reload.
+        liveRef.current = "polling";
+        setLive({ status: "polling", reason: "Retrying the live stream in 30 seconds." });
+        source.close();
+        source = null;
+        if (reconnectTimer) clearTimeout(reconnectTimer);
+        reconnectTimer = setTimeout(connect, 30_000);
+      };
     }
 
-    void connect();
-    /*
-     * The fallback for a deployment with no socket server, which is every
-     * serverless one. It re-reads the page, so the notification list and the
-     * unread count stay current, and the new items are announced the same way
-     * a socket event would announce them.
-     */
-    const fallback = window.setInterval(async () => {
+    connect();
+
+    // A last-resort refresh for the page around the notification bell. The
+    // focused poll below keeps the bell itself current even without a stream.
+    const fallback = window.setInterval(() => {
       router.refresh();
     }, 30_000);
+
     return () => {
       disposed = true;
-      if (refreshTimer.current) clearTimeout(refreshTimer.current);
+      if (reconnectTimer) clearTimeout(reconnectTimer);
       window.clearInterval(fallback);
-      socket?.disconnect();
+      source?.close();
     };
-  }, [router, announce]);
+  }, [router, applyServerList]);
 
   useEffect(() => {
     /*
      * The notification poll.
      *
-     * Socket.IO needs the custom server, so on Vercel there is none and the
-     * only way to hear about a payment is to ask. This asks a small endpoint
-     * for the newest notifications rather than re-rendering the page, so a
-     * payment alert reaches the admin in seconds instead of waiting for the
-     * next page refresh.
+     * The stream is the fast path, but it can be blocked by a proxy, a browser
+     * that does not support EventSource, or a serverless function reaching its
+     * maximum duration. This asks a small endpoint for the newest
+     * notifications rather than re-rendering the page, so a payment alert
+     * reaches the admin in seconds even then.
      *
-     * It stays quiet while the socket is live: the push already delivered the
+     * It stays quiet while the stream is live: the push already delivered the
      * same notification, and announcing it twice would be noise.
      */
     let cancelled = false;
@@ -371,12 +365,16 @@ export function AdminNotificationCenter({ initialItems, initialUnread }: { initi
             ? "Live updates connected"
             : live.status === "connecting"
               ? "Opening the live updates connection"
-              : `Live updates unavailable${live.reason ? `: ${live.reason}` : ""}. The page still refreshes every minute.`
+              : live.status === "polling"
+                ? `Live stream unavailable; notifications still refresh every 10 seconds.${live.reason ? ` ${live.reason}` : ""}`
+                : `Live updates unavailable${live.reason ? `: ${live.reason}` : ""}. Notifications still refresh every 10 seconds.`
         }
         aria-live="polite"
       >
         {live.status === "live" ? (
           <Radio className="h-3.5 w-3.5 text-emerald-600" aria-hidden="true" />
+        ) : live.status === "polling" ? (
+          <RefreshCw className="h-3.5 w-3.5 text-amber-600" aria-hidden="true" />
         ) : (
           <WifiOff className={`h-3.5 w-3.5 ${live.status === "connecting" ? "text-amber-600" : "text-red-600"}`} aria-hidden="true" />
         )}

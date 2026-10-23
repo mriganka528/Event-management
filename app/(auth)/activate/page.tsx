@@ -61,15 +61,32 @@ export default async function ActivatePage({ searchParams }: { searchParams: Pro
                 <AlertTriangle className="h-5 w-5 text-[var(--warning-text)]" />
                 This link cannot be used
               </CardTitle>
-              <CardDescription>{result.message}</CardDescription>
+              <CardDescription>
+                {result.code === "USED"
+                  ? "This activation link has already been used. If you set your password, sign in to receive a fresh code. If you did not finish, ask an administrator to send a new invitation."
+                  : result.message}
+              </CardDescription>
             </CardHeader>
             <CardContent className="grid gap-3">
-              <Link href="/join-the-team">
-                <Button className="w-full">Request a new invitation</Button>
-              </Link>
-              <Link href="/sign-in">
-                <Button variant="outline" className="w-full">Back to sign in</Button>
-              </Link>
+              {result.code === "USED" ? (
+                <>
+                  <Link href="/sign-in">
+                    <Button className="w-full">Back to sign in</Button>
+                  </Link>
+                  <Link href="/join-the-team">
+                    <Button variant="outline" className="w-full">Request a new invitation</Button>
+                  </Link>
+                </>
+              ) : (
+                <>
+                  <Link href="/join-the-team">
+                    <Button className="w-full">Request a new invitation</Button>
+                  </Link>
+                  <Link href="/sign-in">
+                    <Button variant="outline" className="w-full">Back to sign in</Button>
+                  </Link>
+                </>
+              )}
             </CardContent>
           </Card>
         ) : (

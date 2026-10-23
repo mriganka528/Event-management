@@ -2,19 +2,22 @@
 
 import { usePathname } from "next/navigation";
 import { useEffect } from "react";
-import { isTheme, themeAreaForPath, themeStorageKey, type Theme } from "@/lib/theme-scope";
+import { applyDocumentTheme, resolveTheme, themeAreaForPath, themeStorageKey } from "@/lib/theme-scope";
 
 /**
  * Keeps `<html data-theme>` in step with the theme of the *current* area.
  *
- * Mounted once in the root layout, so it covers every route — including the
- * workspaces that render no toggle of their own (`/staff` and `/customer`).
- * Without it, walking from a dark admin panel to the customer dashboard would
- * leave the document wearing the admin area's theme, because the toggle that
- * applies it had just been unmounted.
+ * Mounted once in the root layout, so it covers every route. Without it, walking
+ * from a dark admin panel to the customer booking form would leave the document
+ * wearing the admin theme, because the toggle that applied it had just been
+ * unmounted — the exact "my theme doesn't stick" symptom.
+ *
+ * Two themes means crossing an area boundary is now the common case rather than
+ * the rare one, which is why this matters more than it used to: it is what makes
+ * the customer journey and the workspaces visibly independent.
  *
  * Runs after hydration, so the pre-paint bootstrap in `app/layout.tsx` is what
- * prevents any flash; this is only here to correct the value on navigation.
+ * prevents any flash; this only corrects the value on navigation.
  */
 export function ThemeScopeSync() {
   const pathname = usePathname();
@@ -22,29 +25,13 @@ export function ThemeScopeSync() {
 
   useEffect(() => {
     try {
-      const key = themeStorageKey(area);
-      let saved = window.localStorage.getItem(key);
-
-      if (saved === null) {
-        // Carry over the pre-scoped global preference once, for the public site.
-        const legacy = window.localStorage.getItem("theme");
-        if (isTheme(legacy)) {
-          saved = legacy;
-          window.localStorage.setItem(key, legacy);
-        }
-      }
-
-      const next: Theme = isTheme(saved)
-        ? saved
-        : window.matchMedia("(prefers-color-scheme: dark)").matches
-          ? "dark"
-          : "light";
-
-      if (document.documentElement.dataset.theme !== next) {
-        document.documentElement.dataset.theme = next;
-      }
+      const { theme, migratedFrom } = resolveTheme(area, (key) => window.localStorage.getItem(key));
+      // Fold a preference found under a retired key into the current one, so the
+      // migration happens once rather than on every navigation.
+      if (migratedFrom) window.localStorage.setItem(themeStorageKey(area), theme);
+      applyDocumentTheme(document, theme);
     } catch {
-      // Private mode or a storage-denied origin: the OS preference stands.
+      // Private mode or a storage-denied origin: the default theme stands.
     }
   }, [area]);
 

@@ -120,13 +120,26 @@ h4 {
   text-wrap: balance;
 }
 
+/*
+ * Long unbreakable strings — an email address, a URL, a booking reference —
+ * still have to wrap rather than push a column past the edge of the screen.
+ *
+ * `break-word`, not `anywhere`, and the difference is not cosmetic. `anywhere`
+ * also applies when the browser works out how narrow a box needs to be, so a
+ * table cell reports a min-content width of a single character. Every table in
+ * the app therefore collapsed its columns and started breaking words wherever
+ * it liked: "category" rendered as "cate" and "gory", "unavailable" as
+ * "unavail" and "able". `break-word` still splits a word that cannot fit on a
+ * line by itself, which is the case that actually needs handling, but leaves
+ * normal text to break at spaces and keeps table columns at their real width.
+ */
 p,
 li,
 td,
 th,
 label,
 summary {
-  overflow-wrap: anywhere;
+  overflow-wrap: break-word;
 }
 
 a {

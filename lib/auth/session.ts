@@ -1,5 +1,6 @@
 import "server-only";
 
+import { randomBytes } from "node:crypto";
 import { cookies, headers } from "next/headers";
 import { OtpChannel, SessionStatus } from "@prisma/client";
 import { prisma } from "@/lib/prisma";
@@ -75,12 +76,34 @@ export async function currentRequestInfo(): Promise<DeviceInfo> {
 }
 
 /**
+ * The salt that makes a device id unguessable.
+ *
+ * It is read once, at load, so every device id in a process is derived the
+ * same way. A deployment that has not set one still gets a salt that is not
+ * published in the source: a random one, generated per process. The error is
+ * logged rather than thrown, because a missing salt is a configuration gap
+ * and not a reason to take the application down.
+ */
+const fingerprintSalt = (() => {
+  const salt = process.env.SESSION_FINGERPRINT_SALT?.trim();
+  if (salt) return salt;
+  if (process.env.NODE_ENV === "production") {
+    console.error(
+      "SESSION_FINGERPRINT_SALT is not set. Device ids are being derived from a per-process random value, which means a restart forgets which devices are signed in. Set the variable to a long random string.",
+    );
+    return randomBytes(32).toString("hex");
+  }
+  // A development default keeps the local setup stable across restarts.
+  return "development-salt";
+})();
+
+/**
  * A stable, non-identifying device id derived from coarse request traits. It is
  * only used to recognise "the same device"; the session token remains the actual
  * credential, so a spoofed value gains nothing.
  */
 function fingerprint(userAgent: string | null): string {
-  const seed = `${userAgent ?? "unknown"}|${process.env.SESSION_FINGERPRINT_SALT ?? "salt"}`;
+  const seed = `${userAgent ?? "unknown"}|${fingerprintSalt}`;
   return sha256(seed).slice(0, 32);
 }
 
@@ -219,9 +242,22 @@ export async function setSessionCookies(token: string, deviceId: string) {
   });
 }
 
+/**
+ * How long a sign-in lasts.
+ *
+ * Thirty days by default. The session is a persistent credential, not a browser
+ * tab: closing the laptop, restarting, or leaving the site for a week must not
+ * silently sign an administrator or customer out. Twelve hours used to be the
+ * default, which is shorter than the gap between "plan the event" and "come back
+ * to check it" — the cookie was gone before the next visit.
+ *
+ * The database row has no separate expiry; the cookie's `maxAge` is the lifetime.
+ * Revoking a session, deactivating an account, or signing out still takes effect
+ * immediately because every request re-checks the row (see `getAuthContext`).
+ */
 export function sessionMaxAgeSeconds(): number {
-  const hours = Number(process.env.SESSION_MAX_AGE_HOURS ?? 12);
-  return Math.min(Math.max(Number.isFinite(hours) ? hours : 12, 1), 24 * 30) * 3600;
+  const hours = Number(process.env.SESSION_MAX_AGE_HOURS ?? 24 * 30);
+  return Math.min(Math.max(Number.isFinite(hours) ? hours : 24 * 30, 1), 24 * 30) * 3600;
 }
 
 export async function clearSessionCookies() {

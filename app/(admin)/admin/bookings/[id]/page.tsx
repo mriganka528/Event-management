@@ -1,40 +1,40 @@
 import Link from "next/link";
-import { BookingStatus, PaymentMethod, PaymentStage, StaffStatus } from "@prisma/client";
+import type { Metadata } from "next";
+import { BookingStatus, PaymentMethod, PaymentStatus } from "@prisma/client";
 import {
   ArrowLeft,
   CalendarRange,
+  CheckCircle2,
   CreditCard,
   MapPin,
-  Receipt,
-  ShieldCheck,
-  Users,
+  Wallet,
 } from "lucide-react";
 import { notFound } from "next/navigation";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { getAdminBookingById } from "@/lib/admin-bookings";
-import { getAdminStaff } from "@/lib/admin-data";
+import { bookingStatusBadgeClass } from "@/lib/booking-status";
+import { istStartOfDay } from "@/lib/ist";
+import { isAssignmentLive } from "@/lib/staff-assignment";
+import { getStaffOptions } from "@/lib/admin-data";
 import { unassignStaffFormAction } from "@/lib/form-actions";
 import { BookingOperations } from "@/components/admin/booking-operations";
+import { PendingCashApprovals } from "@/components/admin/pending-cash-approvals";
+import { PaymentHistory } from "@/components/payments/payment-history";
+import { InvoiceDownloadButton } from "@/components/invoices/invoice-download-button";
+import { InvoiceViewLink } from "@/components/invoices/invoice-view-link";
 import { ActionForm } from "@/components/forms/action-form";
-import { cn, formatCurrency, formatDate } from "@/lib/utils";
+import { PAYMENT_REQUEST_LABEL, paymentRequestOutstanding } from "@/lib/payment-requests";
+import { cn, formatCurrency, formatDate, formatEventDate } from "@/lib/utils";
 
-function getStatusBadgeClass(status: BookingStatus) {
-  switch (status) {
-    case BookingStatus.APPROVED:
-      return "bg-emerald-100 text-emerald-800";
-    case BookingStatus.PREPARING:
-      return "bg-blue-100 text-blue-800";
-    case BookingStatus.COMPLETED:
-      return "bg-stone-900 text-stone-50";
-    case BookingStatus.CANCELLED:
-    case BookingStatus.REJECTED:
-      return "bg-red-100 text-red-800";
-    default:
-      return "bg-amber-100 text-amber-800";
-  }
-}
+export const dynamic = "force-dynamic";
+
+export const metadata: Metadata = {
+  title: "Booking details",
+  description: "One booking: quote, payments, inventory reservations, assigned staff, and event schedule.",
+  robots: { index: false, follow: false, nocache: true },
+};
 
 function formatEnum(value: string) {
   return value
@@ -44,21 +44,13 @@ function formatEnum(value: string) {
     .join(" ");
 }
 
-function formatPaymentMethod(method: PaymentMethod) {
-  return method === PaymentMethod.NETBANKING ? "Net Banking" : formatEnum(method);
-}
-
-function formatPaymentStage(stage: PaymentStage) {
-  return formatEnum(stage);
-}
-
 export default async function BookingDetailsPage({
   params,
 }: {
   params: Promise<{ id: string }>;
 }) {
   const { id } = await params;
-  const booking = await getAdminBookingById(id);
+  const [booking, staff] = await Promise.all([getAdminBookingById(id), getStaffOptions()]);
 
   if (!booking) {
     notFound();
@@ -72,7 +64,55 @@ export default async function BookingDetailsPage({
   );
   const totalAssignedStaff = booking.bookingStaff.length;
   const packageServices = booking.package?.packageServices ?? [];
-  const staff = await getAdminStaff();
+  const operationsLocked = booking.status === BookingStatus.CANCELLED || booking.status === BookingStatus.REJECTED;
+  /*
+   * Whether the team has been released from this event.
+   *
+   * The event is over once its dates have passed or the booking has reached a
+   * terminal state, and at that point the roster is a record of who worked it
+   * rather than a list of people still to be booked. The people on it are free
+   * for other events, and the buttons that would change it are not offered.
+   */
+  const teamReleased = !isAssignmentLive({
+    status: booking.status,
+    eventDate: booking.eventDate,
+    durationDays: booking.durationDays,
+  });
+  const capturedPayments = booking.payments.filter((payment) => payment.status === PaymentStatus.CAPTURED);
+  const pendingCashClaims = booking.payments
+    .filter((payment) => payment.status === PaymentStatus.PENDING && payment.method === PaymentMethod.CASH)
+    .map((payment) => ({
+      id: payment.id,
+      bookingId: booking.id,
+      amount: Number(payment.amount),
+      createdAt: payment.createdAt,
+      customerName,
+      bookingLocation: booking.location,
+      balance: Number(booking.balanceAmount),
+    }));
+  const paidAmount = Number(booking.paidAmount);
+  const balanceAmount = Number(booking.balanceAmount);
+  const reservedAmount = Number(booking.reservedPaymentAmount);
+  const availableBalance = Math.max(0, balanceAmount - reservedAmount);
+  const advanceReceived = capturedPayments
+    .filter((payment) => payment.stage === "ADVANCE")
+    .reduce((sum, payment) => sum + Number(payment.amount), 0);
+  const finalReceived = capturedPayments
+    .filter((payment) => payment.stage === "FINAL")
+    .reduce((sum, payment) => sum + Number(payment.amount), 0);
+  const requestedDue = paymentRequestOutstanding({
+    paymentRequestTargetAmount: booking.paymentRequestTargetAmount,
+    paidAmount,
+    balanceAmount,
+  });
+  const remainingAfterRequest = requestedDue === null ? balanceAmount : Math.max(0, balanceAmount - requestedDue);
+  // Newest first, including cash declarations that have not been approved yet.
+  // A pending row has no `paidAt`, so fall back to its creation time.
+  const paymentHistory = [...booking.payments].sort((a, b) => {
+    const aTime = new Date(a.paidAt ?? a.createdAt).getTime();
+    const bTime = new Date(b.paidAt ?? b.createdAt).getTime();
+    return bTime - aTime;
+  });
 
   return (
     <main className="space-y-6">
@@ -86,8 +126,8 @@ export default async function BookingDetailsPage({
                 Back to bookings
               </Button>
             </Link>
-            <Badge className={getStatusBadgeClass(booking.status)}>{formatEnum(booking.status)}</Badge>
-            <Badge className="bg-stone-900 text-stone-50">Booking ID {booking.id.slice(0, 8)}</Badge>
+            <Badge className={bookingStatusBadgeClass(booking.status)}>{formatEnum(booking.status)}</Badge>
+            <Badge className="bg-[var(--surface-strong)] text-[var(--foreground)]">Booking ID {booking.id.slice(0, 8)}</Badge>
           </div>
 
           <div className="flex flex-col gap-6 lg:flex-row lg:items-end lg:justify-between">
@@ -103,12 +143,10 @@ export default async function BookingDetailsPage({
             </div>
             <div className="flex flex-wrap gap-3">
               {booking.invoice ? (
-                <Link href={`/api/invoices/${booking.invoice.id}/download`}>
-                  <Button>
-                    <Receipt className="mr-2 h-4 w-4" />
-                    Download invoice
-                  </Button>
-                </Link>
+                <>
+                  <InvoiceViewLink href={`/admin/invoices/${booking.invoice.id}`} variant="default" size="default" />
+                  <InvoiceDownloadButton invoiceId={booking.invoice.id} label="Download PDF" />
+                </>
               ) : null}
               <Link href="/admin/payments">
                 <Button variant="outline">Payments hub</Button>
@@ -125,7 +163,7 @@ export default async function BookingDetailsPage({
         {[
           {
             label: "Event date",
-            value: formatDate(booking.eventDate),
+            value: formatEventDate(booking.eventDate),
             icon: CalendarRange,
           },
           {
@@ -134,14 +172,14 @@ export default async function BookingDetailsPage({
             icon: CreditCard,
           },
           {
-            label: "Inventory reserved",
-            value: `${totalReservedInventory} items`,
-            icon: ShieldCheck,
+            label: "Paid so far",
+            value: formatCurrency(booking.paidAmount),
+            icon: CheckCircle2,
           },
           {
-            label: "Assigned staff",
-            value: `${totalAssignedStaff} team members`,
-            icon: Users,
+            label: "Balance due",
+            value: formatCurrency(booking.balanceAmount),
+            icon: Wallet,
           },
         ].map(({ label, value, icon: Icon }) => (
           <Card key={label} className="bg-[color:color-mix(in_srgb,var(--card)_92%,transparent)]">
@@ -158,21 +196,160 @@ export default async function BookingDetailsPage({
         ))}
       </section>
 
+      <Card>
+        <CardHeader>
+          <CardTitle className="flex items-center gap-2">
+            <Wallet className="h-5 w-5 text-[var(--brand-dark)]" />
+            Payments and invoice
+          </CardTitle>
+          <CardDescription>
+            Every advance, requested instalment, cash declaration, and settlement for this booking.
+          </CardDescription>
+        </CardHeader>
+        <CardContent className="grid gap-6">
+          <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+            {[
+              { label: "Advance received", value: formatCurrency(advanceReceived) },
+              { label: "Final received", value: formatCurrency(finalReceived) },
+              { label: "Requested now", value: requestedDue === null ? "None" : formatCurrency(requestedDue) },
+              {
+                label: "Remaining after request",
+                value: formatCurrency(remainingAfterRequest),
+              },
+            ].map((item) => (
+              <div key={item.label} className="rounded-[20px] bg-[var(--surface-muted)] p-4">
+                <p className="text-sm text-[var(--muted)]">{item.label}</p>
+                <p className="mt-2 text-lg font-semibold text-[var(--foreground)]">{item.value}</p>
+              </div>
+            ))}
+          </div>
+
+          <div className="grid gap-4 rounded-[24px] border border-[var(--line)] p-5 lg:grid-cols-[1.15fr_0.85fr]">
+            <div>
+              <p className="text-sm text-[var(--muted)]">Active payment request</p>
+              {requestedDue !== null && booking.paymentRequestMode ? (
+                <>
+                  <p className="mt-1 text-lg font-semibold text-[var(--foreground)]">
+                    {PAYMENT_REQUEST_LABEL[booking.paymentRequestMode]}
+                  </p>
+                  <p className="mt-1 text-sm text-[var(--muted)]">
+                    Outstanding on this request:{" "}
+                    <span className="font-semibold text-[var(--foreground)]">{formatCurrency(requestedDue)}</span>
+                  </p>
+                  {booking.paymentRequestedAt ? (
+                    <p className="mt-1 text-xs text-[var(--muted)]">
+                      Requested {formatDate(booking.paymentRequestedAt)}
+                    </p>
+                  ) : null}
+                </>
+              ) : (
+                <p className="mt-1 text-sm text-[var(--muted)]">
+                  No active payment request. Use the controls below to ask for a 25% advance, half of the
+                  remaining balance, or the full balance.
+                </p>
+              )}
+            </div>
+            <div className="rounded-2xl bg-[var(--surface-muted)] p-4 text-sm">
+              <div className="flex justify-between gap-3">
+                <span className="text-[var(--muted)]">Subtotal</span>
+                <span>{formatCurrency(booking.subtotal)}</span>
+              </div>
+              <div className="mt-2 flex justify-between gap-3">
+                <span className="text-[var(--muted)]">Tax</span>
+                <span>{formatCurrency(booking.taxAmount)}</span>
+              </div>
+              <div className="mt-2 flex justify-between gap-3 border-t border-[var(--line)] pt-2 font-semibold">
+                <span>Total</span>
+                <span>{formatCurrency(booking.totalAmount)}</span>
+              </div>
+              <div className="mt-2 flex justify-between gap-3 text-[var(--success-text)]">
+                <span>Paid</span>
+                <span>{formatCurrency(booking.paidAmount)}</span>
+              </div>
+              <div className="mt-2 flex justify-between gap-3 font-semibold">
+                <span>Balance due</span>
+                <span>{formatCurrency(booking.balanceAmount)}</span>
+              </div>
+              {reservedAmount > 0 ? (
+                <p className="mt-3 rounded-xl bg-[var(--warning-soft)] p-3 text-xs text-[var(--warning-text)]">
+                  {formatCurrency(reservedAmount)} is reserved by an online checkout;{" "}
+                  {formatCurrency(availableBalance)} is available to record manually.
+                </p>
+              ) : null}
+            </div>
+          </div>
+
+          <div className="grid gap-3">
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <p className="text-sm font-medium text-[var(--foreground)]">Payment history</p>
+              <Badge className="bg-[var(--surface-strong)] text-[var(--foreground)]">
+                {booking.payments.length} record{booking.payments.length === 1 ? "" : "s"}
+              </Badge>
+            </div>
+            <PaymentHistory
+              payments={paymentHistory}
+              emptyMessage="No payments have been recorded for this booking yet."
+            />
+          </div>
+
+          <div className="rounded-[24px] border border-[var(--line)] p-5">
+            <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+              <div>
+                <p className="text-sm text-[var(--muted)]">Invoice</p>
+                <p className="mt-1 font-medium text-[var(--foreground)]">
+                  {booking.invoice?.invoiceNumber ?? "No invoice created yet"}
+                </p>
+              </div>
+              {booking.invoice ? (
+                <div className="flex flex-wrap items-center gap-2">
+                  <InvoiceViewLink href={`/admin/invoices/${booking.invoice.id}`} />
+                  <InvoiceDownloadButton invoiceId={booking.invoice.id} />
+                </div>
+              ) : (
+                <Badge className="bg-[var(--surface-strong)] text-[var(--foreground)]">Pending generation</Badge>
+              )}
+            </div>
+            {booking.invoice ? (
+              <div className="mt-4 grid gap-3 text-sm text-[var(--muted)] md:grid-cols-3">
+                <p>Issued {formatDate(booking.invoice.issuedAt)}</p>
+                <p>Total {formatCurrency(booking.invoice.totalAmount)}</p>
+                <p>Balance {formatCurrency(booking.invoice.balanceAmount)}</p>
+              </div>
+            ) : null}
+          </div>
+        </CardContent>
+      </Card>
+
       <BookingOperations
         bookingId={booking.id}
         status={booking.status}
         balance={Math.max(0, Number(booking.balanceAmount) - Number(booking.reservedPaymentAmount))}
-        eventDate={booking.eventDate.toISOString()}
+        paidAmount={Number(booking.paidAmount)}
+        totalAmount={Number(booking.totalAmount)}
+        paymentRequestMode={booking.paymentRequestMode}
+        paymentRequestTargetAmount={booking.paymentRequestTargetAmount === null ? null : Number(booking.paymentRequestTargetAmount)}
+        invoiceId={booking.invoice?.id ?? null}
+        invoiceNumber={booking.invoice?.invoiceNumber ?? null}
+        eventDate={istStartOfDay(booking.eventDate)?.toISOString() ?? booking.eventDate.toISOString()}
         location={booking.location}
         eventTitle={booking.event?.title}
-        staff={staff.filter((member) => member.isAvailable && member.status === StaffStatus.ACTIVE).map((member) => ({
+        staff={staff.map((member) => ({
           id: member.id,
           name: `${member.user.firstName} ${member.user.lastName ?? ""}`.trim(),
           type: member.staffType,
           available: member.isAvailable,
         }))}
-        assignedStaffIds={booking.bookingStaff.map((assignment) => assignment.staffId)}
+        assignedStaff={booking.bookingStaff.map((assignment) => ({
+          assignmentId: assignment.id,
+          id: assignment.staffId,
+          name: `${assignment.staff.user.firstName} ${assignment.staff.user.lastName ?? ""}`.trim(),
+          type: assignment.staff.staffType,
+          assignedAt: assignment.assignedAt.toISOString(),
+        }))}
+        teamReleased={teamReleased}
       />
+
+      <PendingCashApprovals claims={pendingCashClaims} />
 
       <section className="grid gap-6 xl:grid-cols-[1.1fr_0.9fr]">
         <div className="grid gap-6">
@@ -182,14 +359,17 @@ export default async function BookingDetailsPage({
               <CardDescription>Primary identity and logistics details for this booking.</CardDescription>
             </CardHeader>
             <CardContent className="grid gap-6 md:grid-cols-2">
-              <div className="space-y-4 rounded-[24px] bg-stone-50 p-5">
+              <div className="space-y-4 rounded-[24px] bg-[var(--surface-muted)] p-5">
                 <div>
                   <p className="text-sm text-[var(--muted)]">Customer name</p>
-                  <p className="mt-1 font-medium text-[var(--foreground)]">{customerName}</p>
+                  {/* `break-all`, like the rest of the admin screens: an address
+                      has no spaces, so at a narrow width it is wider than the box
+                      it is in. */}
+                  <p className="mt-1 break-words font-medium text-[var(--foreground)]">{customerName}</p>
                 </div>
                 <div>
                   <p className="text-sm text-[var(--muted)]">Email</p>
-                  <p className="mt-1 font-medium text-[var(--foreground)]">
+                  <p className="mt-1 break-all font-medium text-[var(--foreground)]">
                     {booking.customer.user.email}
                   </p>
                 </div>
@@ -207,7 +387,7 @@ export default async function BookingDetailsPage({
                 </div>
               </div>
 
-              <div className="space-y-4 rounded-[24px] bg-stone-50 p-5">
+              <div className="space-y-4 rounded-[24px] bg-[var(--surface-muted)] p-5">
                 <div>
                   <p className="text-sm text-[var(--muted)]">Event type</p>
                   <p className="mt-1 font-medium text-[var(--foreground)]">
@@ -217,7 +397,7 @@ export default async function BookingDetailsPage({
                 <div>
                   <p className="text-sm text-[var(--muted)]">Event date</p>
                   <p className="mt-1 font-medium text-[var(--foreground)]">
-                    {formatDate(booking.eventDate)}
+                    {formatEventDate(booking.eventDate)}
                   </p>
                 </div>
                 <div>
@@ -231,6 +411,14 @@ export default async function BookingDetailsPage({
                   <p className="text-sm text-[var(--muted)]">Guest count</p>
                   <p className="mt-1 font-medium text-[var(--foreground)]">
                     {booking.guestCount} guests
+                  </p>
+                </div>
+                <div>
+                  {/* Only per-day services read this, but an approver quoting
+                      crockery for the whole function needs to see it. */}
+                  <p className="text-sm text-[var(--muted)]">Duration</p>
+                  <p className="mt-1 font-medium text-[var(--foreground)]">
+                    {booking.durationDays} day{booking.durationDays === 1 ? "" : "s"}
                   </p>
                 </div>
                 <div>
@@ -251,7 +439,7 @@ export default async function BookingDetailsPage({
               </CardDescription>
             </CardHeader>
             <CardContent className="grid gap-5">
-              <div className="rounded-[24px] border border-stone-100 bg-stone-50 p-5">
+              <div className="rounded-[24px] border border-[var(--line)] bg-[var(--surface-muted)] p-5">
                 <p className="text-sm text-[var(--muted)]">Selected package</p>
                 <p className="mt-1 text-lg font-semibold text-[var(--foreground)]">
                   {booking.package?.name ?? booking.packageNameSnapshot ?? "Custom service booking"}
@@ -267,7 +455,7 @@ export default async function BookingDetailsPage({
                   {packageServices.map((item) => (
                     <div
                       key={item.serviceId}
-                      className="flex flex-col gap-3 rounded-[20px] border sm:flex-row sm:items-center sm:justify-between border-stone-100 px-4 py-3"
+                      className="flex flex-col gap-3 rounded-[20px] border sm:flex-row sm:items-center sm:justify-between border-[var(--line)] px-4 py-3"
                     >
                       <div>
                         <p className="font-medium text-[var(--foreground)]">{item.service.name}</p>
@@ -284,14 +472,14 @@ export default async function BookingDetailsPage({
               <div className="grid gap-3">
                 <p className="text-sm font-medium text-[var(--foreground)]">Booked service lines</p>
                 {booking.bookingServices.length === 0 ? (
-                  <div className="rounded-[20px] border border-dashed border-stone-200 p-4 text-sm text-[var(--muted)]">
+                  <div className="rounded-[20px] border border-dashed border-[var(--line)] p-4 text-sm text-[var(--muted)]">
                     No service lines are attached to this booking.
                   </div>
                 ) : (
                   booking.bookingServices.map((item) => (
                     <div
                       key={item.id}
-                      className="flex flex-col gap-3 rounded-[20px] border border-stone-100 px-4 py-3 sm:flex-row sm:items-center sm:justify-between"
+                      className="flex flex-col gap-3 rounded-[20px] border border-[var(--line)] px-4 py-3 sm:flex-row sm:items-center sm:justify-between"
                     >
                       <div>
                         <p className="font-medium text-[var(--foreground)]">{item.service.name}</p>
@@ -312,92 +500,13 @@ export default async function BookingDetailsPage({
             </CardContent>
           </Card>
 
-          <Card>
-            <CardHeader>
-              <CardTitle>Payments and invoice</CardTitle>
-              <CardDescription>
-                Financial summary, payment history, and invoice status for settlement tracking.
-              </CardDescription>
-            </CardHeader>
-            <CardContent className="grid gap-6">
-              <div className="grid gap-4 md:grid-cols-4">
-                {[
-                  { label: "Subtotal", value: formatCurrency(booking.subtotal) },
-                  { label: "Tax", value: formatCurrency(booking.taxAmount) },
-                  { label: "Paid", value: formatCurrency(booking.paidAmount) },
-                  { label: "Balance", value: formatCurrency(booking.balanceAmount) },
-                ].map((item) => (
-                  <div key={item.label} className="rounded-[20px] bg-stone-50 p-4">
-                    <p className="text-sm text-[var(--muted)]">{item.label}</p>
-                    <p className="mt-2 text-lg font-semibold text-[var(--foreground)]">
-                      {item.value}
-                    </p>
-                  </div>
-                ))}
-              </div>
-
-              <div className="rounded-[24px] border border-stone-100 p-5">
-                <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
-                  <div>
-                    <p className="text-sm text-[var(--muted)]">Invoice</p>
-                    <p className="mt-1 font-medium text-[var(--foreground)]">
-                      {booking.invoice?.invoiceNumber ?? "No invoice created yet"}
-                    </p>
-                  </div>
-                  {booking.invoice ? (
-                    <Link href={`/api/invoices/${booking.invoice.id}/download`}>
-                      <Button size="sm">Download PDF</Button>
-                    </Link>
-                  ) : (
-                    <Badge className="bg-stone-100 text-stone-700">Pending generation</Badge>
-                  )}
-                </div>
-                {booking.invoice ? (
-                  <div className="mt-4 grid gap-3 text-sm text-[var(--muted)] md:grid-cols-3">
-                    <p>Issued {formatDate(booking.invoice.issuedAt)}</p>
-                    <p>Total {formatCurrency(booking.invoice.totalAmount)}</p>
-                    <p>Balance {formatCurrency(booking.invoice.balanceAmount)}</p>
-                  </div>
-                ) : null}
-              </div>
-
-              <div className="grid gap-3">
-                <p className="text-sm font-medium text-[var(--foreground)]">Payment history</p>
-                {booking.payments.length === 0 ? (
-                  <div className="rounded-[20px] border border-dashed border-stone-200 p-4 text-sm text-[var(--muted)]">
-                    No payments have been recorded for this booking yet.
-                  </div>
-                ) : (
-                  booking.payments.map((payment) => (
-                    <div
-                      key={payment.id}
-                      className="flex flex-col gap-3 rounded-[20px] border border-stone-100 px-4 py-3 sm:flex-row sm:items-center sm:justify-between"
-                    >
-                      <div>
-                        <p className="font-medium text-[var(--foreground)]">
-                          {formatCurrency(payment.amount)}
-                        </p>
-                        <p className="text-sm text-[var(--muted)]">
-                          {formatPaymentStage(payment.stage)} via {formatPaymentMethod(payment.method)}
-                        </p>
-                      </div>
-                      <div className="text-right text-sm text-[var(--muted)]">
-                        <p>{formatDate(payment.paidAt)}</p>
-                        <p>{payment.reference?.trim() || "No reference recorded"}</p>
-                      </div>
-                    </div>
-                  ))
-                )}
-              </div>
-            </CardContent>
-          </Card>
         </div>
 
         <div className="grid gap-6">
-          <Card className="bg-[linear-gradient(180deg,rgba(37,28,22,0.98),rgba(20,16,12,0.98))] text-white shadow-[0_24px_60px_rgba(28,20,12,0.32)]">
+          <Card>
             <CardHeader>
-              <CardTitle className="text-white">Operational readiness</CardTitle>
-              <CardDescription className="text-white/65">
+              <CardTitle>Operational readiness</CardTitle>
+              <CardDescription>
                 A fast summary for inventory, staff, invoice coverage, and calendar connection.
               </CardDescription>
             </CardHeader>
@@ -408,14 +517,17 @@ export default async function BookingDetailsPage({
                   value: formatEnum(booking.status),
                 },
                 {
-                  label: "Inventory lines",
-                  value: `${booking.bookingInventory.length} reserved categories`,
+                  label: "Inventory reserved",
+                  value:
+                    totalReservedInventory > 0
+                      ? `${totalReservedInventory} items across ${booking.bookingInventory.length} categories`
+                      : "No inventory reserved yet",
                 },
                 {
                   label: "Team assignment",
                   value:
                     totalAssignedStaff > 0
-                      ? `${totalAssignedStaff} members assigned`
+                      ? `${totalAssignedStaff} member${totalAssignedStaff === 1 ? "" : "s"} assigned`
                       : "No staff assigned yet",
                 },
                 {
@@ -423,9 +535,9 @@ export default async function BookingDetailsPage({
                   value: booking.event ? "Linked to event calendar" : "No event record yet",
                 },
               ].map((item) => (
-                <div key={item.label} className="rounded-[22px] border border-white/10 bg-white/5 p-4">
-                  <p className="text-sm text-white/60">{item.label}</p>
-                  <p className="mt-2 font-medium text-white">{item.value}</p>
+                <div key={item.label} className="rounded-[22px] border border-[var(--line)] bg-[var(--surface-muted)] p-4">
+                  <p className="text-sm text-[var(--muted)]">{item.label}</p>
+                  <p className="mt-2 font-medium text-[var(--foreground)]">{item.value}</p>
                 </div>
               ))}
             </CardContent>
@@ -440,7 +552,7 @@ export default async function BookingDetailsPage({
             </CardHeader>
             <CardContent className="grid gap-3">
               {booking.bookingInventory.length === 0 ? (
-                <div className="rounded-[20px] border border-dashed border-stone-200 p-4 text-sm text-[var(--muted)]">
+                <div className="rounded-[20px] border border-dashed border-[var(--line)] p-4 text-sm text-[var(--muted)]">
                   No inventory has been reserved for this booking yet.
                 </div>
               ) : (
@@ -450,7 +562,7 @@ export default async function BookingDetailsPage({
                   return (
                     <div
                       key={item.id}
-                      className="rounded-[20px] border border-stone-100 px-4 py-3"
+                      className="rounded-[20px] border border-[var(--line)] px-4 py-3"
                     >
                       <div className="flex flex-wrap items-center justify-between gap-3">
                         <div>
@@ -461,7 +573,7 @@ export default async function BookingDetailsPage({
                             {formatEnum(item.inventory.category)}
                           </p>
                         </div>
-                        <Badge className={cn(isLow && "bg-red-100 text-red-800")}>
+                        <Badge className={cn(isLow && "bg-[var(--danger-soft)] text-[var(--danger-text)]")}>
                           Reserved {item.quantity}
                         </Badge>
                       </div>
@@ -480,18 +592,22 @@ export default async function BookingDetailsPage({
           <Card>
             <CardHeader>
               <CardTitle>Staff assignment</CardTitle>
-              <CardDescription>Assigned team members and their current role for the booking.</CardDescription>
+              <CardDescription>
+                {teamReleased
+                  ? "This event is over. The team below is the record of who worked it, and they are free for other events."
+                  : "Assigned team members and their current role for the booking."}
+              </CardDescription>
             </CardHeader>
             <CardContent className="grid gap-3">
               {booking.bookingStaff.length === 0 ? (
-                <div className="rounded-[20px] border border-dashed border-stone-200 p-4 text-sm text-[var(--muted)]">
+                <div className="rounded-[20px] border border-dashed border-[var(--line)] p-4 text-sm text-[var(--muted)]">
                   No staff members have been attached to this booking yet.
                 </div>
               ) : (
                 booking.bookingStaff.map((assignment) => (
                   <div
                     key={assignment.id}
-                    className="rounded-[20px] border border-stone-100 px-4 py-3"
+                    className="rounded-[20px] border border-[var(--line)] px-4 py-3"
                   >
                     <div className="flex flex-wrap items-center justify-between gap-3">
                       <div>
@@ -502,7 +618,14 @@ export default async function BookingDetailsPage({
                           {formatEnum(assignment.staff.staffType)}
                         </p>
                       </div>
-                      <div className="flex items-center gap-2"><Badge>{formatDate(assignment.assignedAt)}</Badge><ActionForm action={unassignStaffFormAction}><input type="hidden" name="bookingId" value={booking.id} /><input type="hidden" name="assignmentId" value={assignment.id} /><Button type="submit" size="sm" variant="outline">Remove</Button></ActionForm></div>
+                      {/*
+                        The Remove button is only offered while the team is
+                        still booked. Once the event is over the row is history,
+                        and a button for un-assigning somebody from work that
+                        has already happened is an invitation to erase the
+                        record of who did it.
+                      */}
+                      <div className="flex items-center gap-2"><Badge>{formatDate(assignment.assignedAt)}</Badge>{teamReleased ? <Badge className="bg-[var(--surface-strong)] text-[var(--muted)]">Released</Badge> : operationsLocked ? <Badge className="bg-[var(--surface-strong)] text-[var(--muted)]">Locked</Badge> : <ActionForm action={unassignStaffFormAction}><input type="hidden" name="bookingId" value={booking.id} /><input type="hidden" name="assignmentId" value={assignment.id} /><Button type="submit" size="sm" variant="outline">Remove</Button></ActionForm>}</div>
                     </div>
                   </div>
                 ))
@@ -516,7 +639,7 @@ export default async function BookingDetailsPage({
               <CardDescription>Timeline and system metadata linked to this booking record.</CardDescription>
             </CardHeader>
             <CardContent className="grid gap-4 text-sm">
-              <div className="rounded-[20px] bg-stone-50 p-4">
+              <div className="rounded-[20px] bg-[var(--surface-muted)] p-4">
                 <p className="text-[var(--muted)]">Calendar event</p>
                 <p className="mt-1 font-medium text-[var(--foreground)]">
                   {booking.event?.title ?? "No event created yet"}
@@ -527,7 +650,7 @@ export default async function BookingDetailsPage({
                     : "Create an event record when operations planning begins."}
                 </p>
               </div>
-              <div className="rounded-[20px] bg-stone-50 p-4">
+              <div className="rounded-[20px] bg-[var(--surface-muted)] p-4">
                 <p className="text-[var(--muted)]">Record timestamps</p>
                 <p className="mt-1 text-[var(--foreground)]">Created {formatDate(booking.createdAt)}</p>
                 <p className="mt-1 text-[var(--foreground)]">Updated {formatDate(booking.updatedAt)}</p>

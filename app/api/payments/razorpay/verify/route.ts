@@ -2,7 +2,7 @@ import { NextResponse } from "next/server";
 import { requireApiCustomer } from "@/lib/route-guards";
 import { AuthError } from "@/lib/route-guards";
 import { prisma } from "@/lib/prisma";
-import { captureRazorpayPayment } from "@/lib/razorpay-payments";
+import { captureRazorpayPayment, paymentMethodFromProvider } from "@/lib/razorpay-payments";
 import { getRazorpayClient, verifyCheckoutSignature } from "@/lib/razorpay-server";
 import { rateLimitApi, readJsonBody, rejectCrossSiteMutation, rejectOversizedBody, requireJsonContentType, withNoStore, InvalidJsonError, RequestBodyTooLargeError } from "@/lib/security";
 
@@ -41,10 +41,10 @@ export async function POST(request: Request) {
     const localOrder = await prisma.paymentOrder.findUnique({ where: { providerOrderId }, include: { booking: { select: { customerId: true, totalAmount: true, balanceAmount: true } } } });
     if (!localOrder || localOrder.booking.customerId !== user.customerProfile.id) return withNoStore(NextResponse.json({ error: "Payment order not found." }, { status: 404 }));
 
-    const providerPayment = await getRazorpayClient().payments.fetch(providerPaymentId) as { id?: string; order_id?: string; amount?: number; currency?: string; status?: string };
+    const providerPayment = await getRazorpayClient().payments.fetch(providerPaymentId) as { id?: string; order_id?: string; amount?: number; currency?: string; status?: string; method?: string };
     if (providerPayment.order_id !== providerOrderId || providerPayment.status !== "captured" || providerPayment.amount !== Math.round(Number(localOrder.amount) * 100) || providerPayment.currency !== localOrder.currency) return withNoStore(NextResponse.json({ error: "Razorpay has not confirmed this payment yet." }, { status: 409 }));
 
-    const result = await captureRazorpayPayment({ providerOrderId, providerPaymentId, signature });
+    const result = await captureRazorpayPayment({ providerOrderId, providerPaymentId, signature, method: paymentMethodFromProvider(providerPayment.method) });
     return withNoStore(NextResponse.json({ status: "paid", alreadyProcessed: result.alreadyProcessed }));
   } catch (error) {
     if (error instanceof RequestBodyTooLargeError) return withNoStore(NextResponse.json({ error: "Request body is too large." }, { status: 413 }));

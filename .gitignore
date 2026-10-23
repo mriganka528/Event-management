@@ -13,6 +13,9 @@
 # testing
 /coverage
 
+# database snapshots (contain production rows and credential hashes)
+/backups/
+
 # next.js
 /.next/
 /out/

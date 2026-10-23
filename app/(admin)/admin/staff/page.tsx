@@ -1,8 +1,10 @@
 import { StaffStatus, StaffType } from "@prisma/client";
+import type { Metadata } from "next";
 import { BriefcaseBusiness, MailCheck, Plus, UserCheck, UserRoundX } from "lucide-react";
 import { getAdminStaff } from "@/lib/admin-data";
 import { createStaffFormAction, removeStaffFormAction, resendStaffInviteFormAction, updateStaffFormAction } from "@/lib/form-actions";
-import { formatDate } from "@/lib/utils";
+import { formatDate, formatEventDate } from "@/lib/utils";
+import { isAssignmentLive } from "@/lib/staff-assignment";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
@@ -11,8 +13,16 @@ import { Select } from "@/components/ui/select";
 import { SubmitButton } from "@/components/forms/submit-button";
 import { EmptyState } from "@/components/forms/empty-state";
 import { ActionForm } from "@/components/forms/action-form";
+import { AdminSearch } from "@/components/admin/admin-search";
+import { normalizeQuery, rowFilter, rowText } from "@/lib/search";
 
 export const dynamic = "force-dynamic";
+
+export const metadata: Metadata = {
+  title: "Staff",
+  description: "Invite team members, set their role, and control their availability.",
+  robots: { index: false, follow: false, nocache: true },
+};
 
 const staffTypes = Object.values(StaffType).map((type) => ({ label: type.charAt(0) + type.slice(1).toLowerCase().replaceAll("_", " "), value: type }));
 
@@ -21,13 +31,30 @@ function staffTypeLabel(type: StaffType) {
   return type.charAt(0) + type.slice(1).toLowerCase().replaceAll("_", " ");
 }
 
-function StaffCard({ member }: { member: Awaited<ReturnType<typeof getAdminStaff>>[number] }) {
+function StaffCard({ member, visibility }: { member: Awaited<ReturnType<typeof getAdminStaff>>[number]; visibility: (text: string) => { display: string } | undefined }) {
   const isActive = member.status === StaffStatus.ACTIVE;
   const isPending = member.status === StaffStatus.PENDING;
+  const isRemoved = member.status === StaffStatus.SUSPENDED;
   const initials = `${member.user.firstName.charAt(0)}${member.user.lastName?.charAt(0) ?? ""}`.toUpperCase();
+  /*
+   * The live assignments and the finished ones.
+   *
+   * An assignment is released when its event ends, so a member who has worked
+   * six events this season is holding none of them. The finished ones stay as
+   * history — they are the record of the work they did.
+   */
+  const liveAssignments = member.assignments.filter((assignment) => isAssignmentLive(assignment.booking));
+  const finishedAssignments = member.assignments.filter((assignment) => !isAssignmentLive(assignment.booking));
+  const searchText = rowText(
+    member.user.firstName,
+    member.user.lastName,
+    member.user.email,
+    staffTypeLabel(member.staffType),
+    isRemoved ? "removed suspended" : member.status,
+  );
 
   return (
-    <li className="flex h-full flex-col rounded-2xl border border-[var(--line)] bg-[var(--card)] p-4 sm:p-5">
+    <li data-row-id={member.id} data-row-text={searchText} style={visibility(searchText)} className="flex h-full flex-col rounded-2xl border border-[var(--line)] bg-[var(--card)] p-4 sm:p-5">
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div className="flex min-w-0 items-center gap-3">
           <span className="flex h-11 w-11 shrink-0 items-center justify-center rounded-2xl bg-amber-100 font-semibold text-amber-800">
@@ -44,14 +71,18 @@ function StaffCard({ member }: { member: Awaited<ReturnType<typeof getAdminStaff
           </Badge>
         ) : (
           <Badge className={isPending ? "bg-amber-100 text-amber-900" : "bg-red-100 text-red-800"}>
-            {isPending ? "Pending activation" : "Suspended"}
+            {isPending ? "Pending activation" : isRemoved ? "Access removed" : "Suspended"}
           </Badge>
         )}
       </div>
 
       <div className="mt-5 flex flex-wrap items-center gap-x-4 gap-y-1 text-sm">
         <span className="capitalize text-[var(--muted)]">{staffTypeLabel(member.staffType)}</span>
-        <span className="text-[var(--muted)]">{member.assignments.length} assignment(s)</span>
+        {/*
+          The count is the live one — the assignments that still hold this
+          person. The finished ones are history, and they are listed below.
+        */}
+        <span className="text-[var(--muted)]">{liveAssignments.length} current assignment{liveAssignments.length === 1 ? "" : "s"}</span>
         {member.managedBy ? <span className="text-[var(--muted)]">Reports to {member.managedBy.user.firstName}</span> : null}
       </div>
 
@@ -59,6 +90,33 @@ function StaffCard({ member }: { member: Awaited<ReturnType<typeof getAdminStaff
         <p className="mt-3 text-xs text-[var(--muted)]">
           Invited {member.invitedAt ? formatDate(member.invitedAt) : "recently"}. They activate from the link in their email.
         </p>
+      ) : null}
+
+      {isRemoved ? (
+        <p className="mt-3 rounded-xl bg-[var(--surface-muted)] p-3 text-xs text-[var(--muted)]">
+          Access removed. They are signed out, cannot sign in with their old password, and can submit a new access request for review.
+        </p>
+      ) : null}
+
+      {/*
+        The finished work.
+
+        Shown for everybody, not only for a removed member. A member who is
+        still on the team has usually worked events too, and those events are
+        what is no longer holding them — so the list is how an administrator
+        sees that they are free for the next booking.
+      */}
+      {finishedAssignments.length > 0 ? (
+        <details className="mt-3 rounded-xl border border-[var(--line)] p-3 text-xs text-[var(--muted)]">
+          <summary className="cursor-pointer font-medium text-[var(--foreground)]">Previous work ({finishedAssignments.length})</summary>
+          <ul className="mt-2 space-y-1">
+            {finishedAssignments.map((assignment) => (
+              <li key={assignment.id}>
+                {formatEventDate(assignment.booking.eventDate)} · {assignment.booking.location} · {assignment.booking.status.toLowerCase()}
+              </li>
+            ))}
+          </ul>
+        </details>
       ) : null}
 
       {/*
@@ -76,35 +134,51 @@ function StaffCard({ member }: { member: Awaited<ReturnType<typeof getAdminStaff
         </ActionForm>
       ) : null}
 
-      <div className="mt-auto flex flex-col gap-2 pt-4 sm:flex-row">
-        {isActive ? (
-          <ActionForm action={updateStaffFormAction} className="flex-1">
+      {!isRemoved ? (
+        <div className="mt-auto flex flex-col gap-2 pt-4 sm:flex-row">
+          {isActive ? (
+            <ActionForm action={updateStaffFormAction} className="flex-1">
+              <input type="hidden" name="id" value={member.id} />
+              <input type="hidden" name="isAvailable" value={member.isAvailable ? "false" : "true"} />
+              <Button type="submit" size="sm" variant="outline" className="w-full">
+                {member.isAvailable ? "Mark unavailable" : "Mark available"}
+              </Button>
+            </ActionForm>
+          ) : isPending ? (
+            <ActionForm action={resendStaffInviteFormAction} className="flex-1">
+              <input type="hidden" name="id" value={member.id} />
+              <Button type="submit" size="sm" variant="outline" className="w-full">Resend invite</Button>
+            </ActionForm>
+          ) : null}
+          <ActionForm action={removeStaffFormAction}>
             <input type="hidden" name="id" value={member.id} />
-            <input type="hidden" name="isAvailable" value={member.isAvailable ? "false" : "true"} />
-            <Button type="submit" size="sm" variant="outline" className="w-full">
-              {member.isAvailable ? "Mark unavailable" : "Mark available"}
-            </Button>
+            <Button type="submit" size="sm" variant="destructive" className="w-full">Remove</Button>
           </ActionForm>
-        ) : isPending ? (
-          <ActionForm action={resendStaffInviteFormAction} className="flex-1">
-            <input type="hidden" name="id" value={member.id} />
-            <Button type="submit" size="sm" variant="outline" className="w-full">Resend invite</Button>
-          </ActionForm>
-        ) : null}
-        <ActionForm action={removeStaffFormAction}>
-          <input type="hidden" name="id" value={member.id} />
-          <Button type="submit" size="sm" variant="destructive" className="w-full">Remove</Button>
-        </ActionForm>
-      </div>
+        </div>
+      ) : null}
     </li>
   );
 }
 
-export default async function StaffPage() {
+export default async function StaffPage({ searchParams }: { searchParams: Promise<{ q?: string }> }) {
+  const query = normalizeQuery((await searchParams).q);
   const staff = await getAdminStaff();
+  // Rows stay mounted and non-matching ones are hidden, so clearing the search
+  // restores them instantly.
+  const visibility = rowFilter(query);
   const activeCount = staff.filter((member) => member.status === StaffStatus.ACTIVE).length;
   const pendingCount = staff.filter((member) => member.status === StaffStatus.PENDING).length;
-  const assignedCount = staff.reduce((sum, member) => sum + member.assignments.length, 0);
+  /*
+   * Only the assignments that still hold the person.
+   *
+   * The count was every assignment a member had ever had, so a decorator who
+   * had worked six events this season read as holding six events. An
+   * assignment is released when its event ends, and the person is free for the
+   * next one.
+   */
+  const assignedCount = staff
+    .filter((member) => member.status === StaffStatus.ACTIVE)
+    .reduce((sum, member) => sum + member.assignments.filter((assignment) => isAssignmentLive(assignment.booking)).length, 0);
 
   const metrics = [
     { label: "Team members", value: staff.length, icon: BriefcaseBusiness },
@@ -115,6 +189,10 @@ export default async function StaffPage() {
 
   return (
     <main className="space-y-6">
+      <AdminSearch
+        label="Search staff"
+        placeholder="Search by name, email, role, or status…"
+      />
       <section className="flex flex-col gap-5 rounded-[32px] border border-[var(--line)] bg-[var(--card)] p-6 shadow-sm sm:p-8 lg:flex-row lg:items-end lg:justify-between">
         <div className="min-w-0">
           <p className="text-sm font-semibold uppercase tracking-[0.25em] text-amber-700">People &amp; operations</p>
@@ -157,7 +235,7 @@ export default async function StaffPage() {
             <EmptyState title="No staff members yet" description="Add your operations team below." />
           ) : (
             <ul className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
-              {staff.map((member) => <StaffCard key={member.id} member={member} />)}
+              {staff.map((member) => <StaffCard key={member.id} member={member} visibility={visibility} />)}
             </ul>
           )}
         </CardContent>

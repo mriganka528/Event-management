@@ -1,11 +1,11 @@
 import type { Metadata, Viewport } from "next";
 import { DM_Sans, Playfair_Display } from "next/font/google";
-import { ClerkProvider } from "@clerk/nextjs";
 import { siteUrl } from "@/lib/site";
-import { clerkAppearance } from "@/lib/clerk-theme";
 import { AppToaster } from "@/components/providers/app-toaster";
 import { ThemeScopeSync } from "@/components/marketing/theme-scope-sync";
+import { AnchorScroll } from "@/components/layout/anchor-scroll";
 import { themeBootstrapScript } from "@/lib/theme-scope";
+import { accountBootstrapScript } from "@/lib/account-bootstrap";
 import "./globals.css";
 
 const sans = DM_Sans({ variable: "--font-sans", subsets: ["latin"] });
@@ -54,21 +54,35 @@ export default function RootLayout({ children }: Readonly<{ children: React.Reac
     <html lang="en" suppressHydrationWarning>
       <head>
         <script dangerouslySetInnerHTML={{ __html: themeBootstrapScript() }} />
+        {/*
+          Starts the public header's one account request while the HTML is still
+          parsing, so it overlaps the JavaScript download instead of waiting
+          behind hydration. See `lib/account-bootstrap.ts`.
+        */}
+        <script dangerouslySetInnerHTML={{ __html: accountBootstrapScript() }} />
       </head>
       <body className={`${sans.variable} ${display.variable} bg-[var(--background)] text-[var(--foreground)] antialiased`}>
         {/*
-          Clerk is mounted here for every route, but only customers ever use it.
-          Staff and administrator sign-in is first-party and never passes through
-          this provider; see `lib/auth/clerk.ts` for how a Clerk identity is
-          exchanged for the ordinary local session.
+          Clerk is mounted only around the customer auth screens (see
+          `app/(customer-auth)/customer/auth/layout.tsx`). It used to wrap every
+          route, which shipped Clerk's client bundle to the admin workspace, the
+          customer dashboard, and the whole marketing site even though none of
+          them render a Clerk component. Staff and administrator sign-in is
+          first-party.
         */}
-        <ClerkProvider appearance={clerkAppearance}>{children}</ClerkProvider>
+        {children}
         {/*
           Applies the current area's theme on navigation. Required because
           `/staff` and `/customer` render no toggle of their own, so the control
           that last wrote `data-theme` is not there to correct it.
         */}
         <ThemeScopeSync />
+        {/*
+          Keeps `/#section` navigation landing on the section. Mounted at the root
+          rather than on the home page so it survives the client-side transition
+          into `/` — which is the navigation that was failing.
+        */}
+        <AnchorScroll />
         <AppToaster />
       </body>
     </html>

@@ -51,18 +51,18 @@ export function TwoFactorForm({ channel, returnTo }: { channel: "email" | "phone
 
         <AuthFeedback state={state} />
 
-        <Button type="submit" disabled={pending || code.length !== 6}>
-          {pending ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <ArrowRight className="mr-2 h-4 w-4" />}
-          Verify and continue
+        <Button type="submit" disabled={pending || code.length !== 6} aria-busy={pending || undefined}>
+          {pending ? <Loader2 className="mr-2 h-4 w-4 animate-spin" aria-hidden="true" /> : <ArrowRight className="mr-2 h-4 w-4" aria-hidden="true" />}
+          {pending ? "Verifying…" : "Verify and continue"}
         </Button>
       </form>
 
       <div className="border-t border-[var(--line)] pt-4">
         <form action={resendAction} className="grid gap-3">
           <AuthFeedback state={resendState} tone="info" />
-          <Button type="submit" variant="ghost" size="sm" disabled={resending} className="justify-self-start">
-            <RefreshCw className={`mr-2 h-4 w-4 ${resending ? "animate-spin" : ""}`} />
-            Send a new code
+          <Button type="submit" variant="ghost" size="sm" disabled={resending} aria-busy={resending || undefined} className="justify-self-start">
+            <RefreshCw className={`mr-2 h-4 w-4 ${resending ? "animate-spin" : ""}`} aria-hidden="true" />
+            {resending ? "Sending a new code…" : "Send a new code"}
           </Button>
         </form>
       </div>

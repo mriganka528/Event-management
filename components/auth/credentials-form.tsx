@@ -189,7 +189,7 @@ function EmailCard({ currentEmail, onBack }: { currentEmail: string; onBack: () 
           <AuthFeedback state={state} />
 
           <div className="flex flex-wrap items-center gap-3">
-            <Button type="submit" disabled={pending || (awaitingCode && code.length !== 6)}>
+            <Button type="submit" disabled={pending || (awaitingCode && code.length !== 6)} aria-busy={pending || undefined}>
               {pending ? (
                 <Loader2 className="mr-2 h-4 w-4 animate-spin" aria-hidden="true" />
               ) : awaitingCode ? (
@@ -197,7 +197,13 @@ function EmailCard({ currentEmail, onBack }: { currentEmail: string; onBack: () 
               ) : (
                 <Mail className="mr-2 h-4 w-4" aria-hidden="true" />
               )}
-              {awaitingCode ? "Confirm the new address" : "Send a code to the new address"}
+              {pending
+                ? awaitingCode
+                  ? "Confirming…"
+                  : "Sending your code…"
+                : awaitingCode
+                  ? "Confirm the new address"
+                  : "Send a code to the new address"}
             </Button>
             {awaitingCode ? (
               <Button type="button" variant="ghost" size="sm" onClick={onBack}>
@@ -303,7 +309,7 @@ function PasswordCard({ onBack }: { onBack: () => void }) {
           <AuthFeedback state={state} />
 
           <div className="flex flex-wrap items-center gap-3">
-            <Button type="submit" disabled={pending || (awaitingCode && code.length !== 6)}>
+            <Button type="submit" disabled={pending || (awaitingCode && code.length !== 6)} aria-busy={pending || undefined}>
               {pending ? (
                 <Loader2 className="mr-2 h-4 w-4 animate-spin" aria-hidden="true" />
               ) : awaitingCode ? (
@@ -311,7 +317,13 @@ function PasswordCard({ onBack }: { onBack: () => void }) {
               ) : (
                 <ShieldCheck className="mr-2 h-4 w-4" aria-hidden="true" />
               )}
-              {awaitingCode ? "Confirm and change password" : "Send a code and continue"}
+              {pending
+                ? awaitingCode
+                  ? "Changing your password…"
+                  : "Sending your code…"
+                : awaitingCode
+                  ? "Confirm and change password"
+                  : "Send a code and continue"}
             </Button>
             {awaitingCode ? (
               <Button type="button" variant="ghost" size="sm" onClick={onBack}>

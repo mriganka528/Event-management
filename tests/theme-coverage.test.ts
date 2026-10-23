@@ -134,8 +134,12 @@ test("clerk's own UI is wired to the theme", () => {
   assert.match(theme, /colorBackground:\s*"var\(--clerk-surface\)"/, "clerk's surface must come from the theme tokens");
   assert.match(theme, /colorForeground:\s*"var\(--clerk-ink\)"/, "clerk's ink must come from the theme tokens");
 
-  const layout = readFileSync("app/layout.tsx", "utf8");
+  // The provider is mounted only around the customer auth screens. It used to
+  // wrap every route, which shipped Clerk's script to the admin and marketing
+  // pages as well; the appearance still has to reach it wherever it is mounted.
+  const layout = readFileSync("app/(customer-auth)/customer/auth/layout.tsx", "utf8");
   assert.match(layout, /ClerkProvider appearance=\{clerkAppearance\}/, "the appearance must be applied at the provider");
+  assert.doesNotMatch(readFileSync("app/layout.tsx", "utf8"), /ClerkProvider/, "the root layout must not ship Clerk to every page");
 
   // The aliases must resolve against tokens that themselves switch with the theme.
   assert.match(css, /--clerk-surface:\s*var\(--card\)/, "clerk aliases must point at the application tokens");

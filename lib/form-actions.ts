@@ -2,8 +2,10 @@
 
 import {
   approveUserAccessAction,
+  approveCashPaymentAction,
   cancelBookingAction,
   changeUserRoleAction,
+  clearPaymentRequestAction,
   createEventAction,
   deleteEventAction,
   createInventoryAction,
@@ -14,14 +16,19 @@ import {
   deletePackageAction,
   deleteServiceAction,
   createStaffAction,
+  declareCashPaymentAction,
   grantAdminAccessAction,
   rejectUserAccessAction,
+  rejectCashPaymentAction,
   removeAdminAction,
+  removeCustomerAction,
   removeStaffAction,
   resendStaffInviteAction,
   markAllNotificationsReadAction,
   markNotificationReadAction,
+  markNotificationsSeenAction as markNotificationsSeen,
   recordPaymentAction,
+  requestPaymentAction,
   reviewAdminRequestAction,
   saveBusinessSettingsAction,
   setInventoryActiveAction,
@@ -105,6 +112,21 @@ export async function resendStaffInviteFormAction(formData: FormData) {
 export async function recordPaymentFormAction(formData: FormData) {
   return runAction(recordPaymentAction, formData);
 }
+export async function declareCashPaymentFormAction(formData: FormData) {
+  return runAction(declareCashPaymentAction, formData);
+}
+export async function approveCashPaymentFormAction(formData: FormData) {
+  return runAction(approveCashPaymentAction, formData);
+}
+export async function rejectCashPaymentFormAction(formData: FormData) {
+  return runAction(rejectCashPaymentAction, formData);
+}
+export async function requestPaymentFormAction(formData: FormData) {
+  return runAction(requestPaymentAction, formData);
+}
+export async function clearPaymentRequestFormAction(formData: FormData) {
+  return runAction(clearPaymentRequestAction, formData);
+}
 export async function createInvoiceFormAction(formData: FormData) {
   return runAction(createInvoiceAction, formData);
 }
@@ -119,6 +141,15 @@ export async function markAllNotificationsFormAction(formData: FormData) {
 }
 export async function markNotificationFormAction(formData: FormData) {
   return runAction(markNotificationReadAction, formData);
+}
+/**
+ * Marks several of the caller's own notifications as read at once.
+ *
+ * Not a `FormData` action: the ids are a list rather than a form field, and
+ * the caller is the notification centre, which already has them in hand.
+ */
+export async function markNotificationsSeenAction(notificationIds: string[]) {
+  return runAction(() => markNotificationsSeen(notificationIds), new FormData());
 }
 export async function reviewAdminRequestFormAction(formData: FormData) {
   return runAction(reviewAdminRequestAction, formData);
@@ -143,6 +174,9 @@ export async function changeUserRoleFormAction(formData: FormData) {
 }
 export async function removeAdminFormAction(formData: FormData) {
   return runAction(removeAdminAction, formData);
+}
+export async function removeCustomerFormAction(formData: FormData) {
+  return runAction(removeCustomerAction, formData);
 }
 export async function grantAdminAccessFormAction(formData: FormData) {
   return runAction(grantAdminAccessAction, formData);

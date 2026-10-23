@@ -1,7 +1,8 @@
 import "server-only";
 import nodemailer, { type Transporter } from "nodemailer";
-import { StaffType } from "@prisma/client";
+import { BookingStatus, StaffType } from "@prisma/client";
 import { absoluteUrl, siteUrl } from "@/lib/site";
+import { formatIstDate } from "@/lib/ist";
 import { humanStaffType, isStaffInviteExpired, staffInviteExpiresAt, staffInviteUrl, STAFF_INVITE_TTL_DAYS } from "@/lib/staff-invite";
 
 export { STAFF_INVITE_TTL_DAYS, isStaffInviteExpired, staffInviteExpiresAt, staffInviteUrl };
@@ -39,6 +40,11 @@ function getTransport(): Transporter | null {
     host: process.env.SMTP_HOST,
     port: Number.isFinite(port) && port > 0 ? port : 587,
     secure: envFlag("SMTP_SECURE") || Number(process.env.SMTP_PORT) === 465,
+    // A mail server that accepts the connection and then goes quiet must not
+    // hold a booking response (or a sign-in code screen) open indefinitely.
+    connectionTimeout: 10_000,
+    greetingTimeout: 10_000,
+    socketTimeout: 20_000,
     auth: process.env.SMTP_USER
       ? { user: process.env.SMTP_USER, pass: process.env.SMTP_PASSWORD }
       : undefined,
@@ -52,7 +58,17 @@ function businessName() {
 }
 
 function fromAddress() {
-  return process.env.SMTP_FROM || "no-reply@localhost";
+  return (process.env.SMTP_FROM || "no-reply@localhost").trim();
+}
+
+/**
+ * `SMTP_FROM` may already be a full `"Name" <address>` header. Wrapping that
+ * again produces a malformed From and the provider rejects the send, so only a
+ * bare mailbox gets the business display name added here.
+ */
+function fromHeader() {
+  const address = fromAddress();
+  return /<[^>]+>/.test(address) ? address : `"${businessName()}" <${address}>`;
 }
 
 function shell(title: string, bodyHtml: string, cta?: { label: string; url: string }) {
@@ -75,19 +91,28 @@ function shell(title: string, bodyHtml: string, cta?: { label: string; url: stri
 }
 
 async function sendMail(input: { to: string; subject: string; html: string; text: string }): Promise<MailResult> {
+  const to = input.to.trim();
+  // A missing or malformed address is the most common reason a customer never
+  // receives a message. Catch it before Nodemailer, and leave a trace the admin
+  // can act on instead of a silent no-op.
+  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(to) || to.length > 254) {
+    console.error(`[mailer] skipped "${input.subject}": no valid recipient address.`);
+    return { sent: false, error: "No valid recipient email address." };
+  }
+
   const transport = getTransport();
   if (!transport) {
     if (process.env.NODE_ENV !== "production") {
-      console.info(`[mailer] SMTP not configured - skipped "${input.subject}" to ${input.to}`);
+      console.info(`[mailer] SMTP not configured - skipped "${input.subject}" to ${to}`);
     }
     return { sent: false, reason: "SMTP is not configured yet." };
   }
   try {
-    await transport.sendMail({ from: `"${businessName()}" <${fromAddress()}>`, ...input });
+    await transport.sendMail({ from: fromHeader(), ...input, to });
     return { sent: true };
   } catch (error) {
     const message = error instanceof Error ? error.message : "Unknown mail error";
-    console.error("[mailer] send failed:", message);
+    console.error(`[mailer] send failed for "${input.subject}" to ${to}:`, message);
     return { sent: false, error: message };
   }
 }
@@ -238,17 +263,255 @@ export async function sendTeamInviteEmail(input: { to: string; firstName: string
 }
 
 /** The super admin's notification that somebody applied to join the team. */
-export async function sendAccessRequestReceivedEmail(input: { to: string; requesterName: string; requesterEmail: string; requestedRole: string }) {
+export async function sendAccessRequestReceivedEmail(input: {
+  to: string;
+  requesterName: string;
+  requesterEmail: string;
+  requestedRole: string;
+  /** What they asked to be, e.g. `driver`. Staff requests only. */
+  requestedStaffType?: string | null;
+}) {
   const url = absoluteUrl("/admin/admins");
+  const asText = input.requestedStaffType ? `${input.requestedRole} — ${input.requestedStaffType}` : input.requestedRole;
+  const asHtml = input.requestedStaffType
+    ? `a <strong>${input.requestedRole.toLowerCase()}</strong> — specifically <strong>${input.requestedStaffType}</strong>`
+    : `a <strong>${input.requestedRole.toLowerCase()}</strong>`;
   return sendMail({
     to: input.to,
-    subject: `${input.requesterName} requested ${input.requestedRole} access`,
+    subject: `${input.requesterName} requested ${asText} access`,
     html: shell(
       "New access request",
-      `<p><strong>${input.requesterName}</strong> (${input.requesterEmail}) asked to join the team as a <strong>${input.requestedRole.toLowerCase()}</strong>.</p>
+      `<p><strong>${input.requesterName}</strong> (${input.requesterEmail}) asked to join the team as ${asHtml}.</p>
        <p>Review the request on the Admins page. Nothing is granted until you approve it.</p>`,
       { label: "Review request", url },
     ),
-    text: `${input.requesterName} (${input.requesterEmail}) requested ${input.requestedRole} access. Review it at ${url}`,
+    text: `${input.requesterName} (${input.requesterEmail}) requested ${asText} access. Review it at ${url}`,
+  });
+}
+
+/**
+ * Values in these emails come from a Clerk profile, a booking form, or an
+ * administrator's catalog entry, so they are escaped before they are placed in
+ * HTML. A name is not a place to store markup.
+ */
+function escapeHtml(value: string) {
+  return value
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
+}
+
+function money(value: number) {
+  return new Intl.NumberFormat("en-IN", {
+    style: "currency",
+    currency: "INR",
+    maximumFractionDigits: 2,
+  }).format(Number.isFinite(value) ? value : 0);
+}
+
+function eventDateLabel(value: Date) {
+  // IST, like every other date the business shows. See `lib/ist.ts`.
+  return formatIstDate(value);
+}
+
+function eventTypeLabel(value: string) {
+  const words = value.toLowerCase().replaceAll("_", " ");
+  return words.charAt(0).toUpperCase() + words.slice(1);
+}
+
+function firstNameOf(value: string) {
+  return escapeHtml(value.trim() || "there");
+}
+
+/** The first email a customer receives after signing in with Clerk for the first time. */
+export async function sendCustomerWelcomeEmail(input: { to: string; firstName: string }) {
+  const url = absoluteUrl("/customer/dashboard");
+  const name = firstNameOf(input.firstName);
+  return sendMail({
+    to: input.to,
+    subject: `Welcome to ${businessName()}`,
+    html: shell(
+      `Welcome, ${name}`,
+      `<p>Your customer account is ready. From your dashboard you can send booking requests, follow their progress, review invoices, and pay securely.</p>
+       <p>If you need a hand planning an event, reply to this email and our team will help.</p>`,
+      { label: "Open my dashboard", url },
+    ),
+    text: `Welcome to ${businessName()}, ${input.firstName.trim() || "there"}. Your customer account is ready. Open your dashboard: ${url}`,
+  });
+}
+
+/** The request details the customer keeps after submitting a booking. */
+export async function sendBookingRequestEmail(input: {
+  to: string;
+  firstName: string;
+  reference: string;
+  eventType: string;
+  eventDate: Date;
+  location: string;
+  guestCount: number;
+  packageName?: string | null;
+  services: Array<{ name: string; quantity: number }>;
+  totalAmount: number;
+  trackingUrl: string;
+}) {
+  const name = firstNameOf(input.firstName);
+  const reference = escapeHtml(input.reference);
+  const serviceLines = input.services.filter((service) => service.name.trim().length > 0);
+  const serviceHtml =
+    serviceLines.length > 0
+      ? `<p style="margin:14px 0 4px"><strong>Services</strong></p><ul style="margin:0;padding-left:20px">${serviceLines
+          .map((service) => `<li>${escapeHtml(service.name)}${service.quantity > 1 ? ` × ${service.quantity}` : ""}</li>`)
+          .join("")}</ul>`
+      : "";
+  const packageHtml = input.packageName
+    ? `<p><strong>Package:</strong> ${escapeHtml(input.packageName)}</p>`
+    : "";
+  return sendMail({
+    to: input.to,
+    subject: `We received your booking request (${reference})`,
+    html: shell(
+      "Your request is with our team",
+      `<p>Hi ${name},</p>
+       <p>Thank you for your booking request. We have received it and will review the details before confirming availability and the final quote.</p>
+       <p><strong>Reference:</strong> ${reference}<br/>
+          <strong>Event:</strong> ${escapeHtml(eventTypeLabel(input.eventType))} on ${escapeHtml(eventDateLabel(input.eventDate))}<br/>
+          <strong>Location:</strong> ${escapeHtml(input.location)}<br/>
+          <strong>Guests:</strong> ${input.guestCount}<br/>
+          <strong>Estimated total:</strong> ${escapeHtml(money(input.totalAmount))}</p>
+       ${packageHtml}${serviceHtml}
+       <p style="margin-top:16px">You can follow the request from your dashboard. We will email you again when there is an update.</p>`,
+      { label: "View my request", url: input.trackingUrl },
+    ),
+    text: `Hi ${input.firstName.trim() || "there"}, we received your booking request ${reference}. Event: ${eventTypeLabel(input.eventType)} on ${eventDateLabel(input.eventDate)}. Location: ${input.location}. Guests: ${input.guestCount}. Estimated total: ${money(input.totalAmount)}.${input.packageName ? ` Package: ${input.packageName}.` : ""}${serviceLines.length ? ` Services: ${serviceLines.map((service) => `${service.name}${service.quantity > 1 ? ` x ${service.quantity}` : ""}`).join(", ")}.` : ""} Follow it at ${input.trackingUrl}`,
+  });
+}
+
+/** Sent when an administrator asks the customer to pay an advance or the balance. */
+export async function sendPaymentRequestEmail(input: {
+  to: string;
+  firstName: string;
+  reference: string;
+  amount: number;
+  modeLabel: string;
+  balanceAmount: number;
+  bookingUrl: string;
+}) {
+  const name = firstNameOf(input.firstName);
+  const reference = escapeHtml(input.reference);
+  const remaining = Math.max(0, input.balanceAmount - input.amount);
+  return sendMail({
+    to: input.to,
+    subject: `Payment requested for booking ${reference}`,
+    html: shell(
+      "A payment is ready for you",
+      `<p>Hi ${name},</p>
+       <p>Our team has requested a <strong>${escapeHtml(input.modeLabel.toLowerCase())}</strong> payment of <strong>${escapeHtml(money(input.amount))}</strong> for booking <strong>${reference}</strong>.</p>
+       <p><strong>Remaining balance after this payment:</strong> ${escapeHtml(money(remaining))}</p>
+       <p>You can pay securely from your dashboard, where the request and invoice are also available.</p>`,
+      { label: "View and pay", url: input.bookingUrl },
+    ),
+    text: `Hi ${input.firstName.trim() || "there"}, a ${input.modeLabel.toLowerCase()} payment of ${money(input.amount)} has been requested for booking ${reference}. Remaining balance after this payment: ${money(remaining)}. View and pay: ${input.bookingUrl}`,
+  });
+}
+
+/** Sent when a manual, cash, or online payment has been recorded. */
+export async function sendPaymentReceivedEmail(input: {
+  to: string;
+  firstName: string;
+  reference: string;
+  amount: number;
+  balanceAmount: number;
+  bookingUrl: string;
+}) {
+  const name = firstNameOf(input.firstName);
+  const reference = escapeHtml(input.reference);
+  const settled = input.balanceAmount <= 0.009;
+  return sendMail({
+    to: input.to,
+    subject: `Payment received for booking ${reference}`,
+    html: shell(
+      "Payment received",
+      `<p>Hi ${name},</p>
+       <p>We have recorded your payment of <strong>${escapeHtml(money(input.amount))}</strong> for booking <strong>${reference}</strong>.</p>
+       <p>${settled ? "Your booking is now fully paid." : `<strong>Remaining balance:</strong> ${escapeHtml(money(input.balanceAmount))}`}</p>
+       <p>You can review the payment and invoice from your dashboard.</p>`,
+      { label: "View my booking", url: input.bookingUrl },
+    ),
+    text: `Hi ${input.firstName.trim() || "there"}, we received your payment of ${money(input.amount)} for booking ${reference}. ${settled ? "Your booking is now fully paid." : `Remaining balance: ${money(input.balanceAmount)}.`} View it at ${input.bookingUrl}`,
+  });
+}
+
+/**
+ * Copy for every booking status. A status change is an update the customer
+ * asked for, so approval and decline are not the only messages: preparation,
+ * completion, and cancellation each get wording of their own. A cancellation
+ * mentions money explicitly because a captured payment may need a refund.
+ */
+const BOOKING_STATUS_EMAIL: Record<BookingStatus, { subject: string; heading: string; body: string; text: string }> = {
+  [BookingStatus.PENDING]: {
+    subject: "Your booking is being reviewed",
+    heading: "We have your request",
+    body: "Your booking is back in review. We will confirm the details as soon as possible.",
+    text: "your booking is back in review",
+  },
+  [BookingStatus.APPROVED]: {
+    subject: "Your booking is approved",
+    heading: "Your booking is approved",
+    body: "We have reserved the services and will contact you about the next steps.",
+    text: "your booking is approved",
+  },
+  [BookingStatus.PREPARING]: {
+    subject: "We are preparing for your event",
+    heading: "Your event is being prepared",
+    body: "Our team has started preparing for your event. We will keep you updated as the date approaches.",
+    text: "we have started preparing for your event",
+  },
+  [BookingStatus.COMPLETED]: {
+    subject: "Your event is complete",
+    heading: "Thank you for choosing us",
+    body: "Your event has been marked complete. Thank you for trusting us with it. You can review the final invoice from your dashboard.",
+    text: "your event is complete",
+  },
+  [BookingStatus.CANCELLED]: {
+    subject: "Your booking has been cancelled",
+    heading: "Your booking was cancelled",
+    body: "This booking has been cancelled. If a payment was captured, our team will contact you about the refund and any remaining balance.",
+    text: "your booking has been cancelled",
+  },
+  [BookingStatus.REJECTED]: {
+    subject: "Update on your booking request",
+    heading: "Your booking request was not accepted",
+    body: "Unfortunately we cannot accept this booking at this time. If you would like to discuss alternatives, reply to this email.",
+    text: "we cannot accept your booking request",
+  },
+};
+
+/** Sent on every booking status change. */
+export async function sendBookingStatusEmail(input: {
+  to: string;
+  firstName: string;
+  reference: string;
+  status: BookingStatus;
+  eventDate: Date;
+  location: string;
+  bookingUrl: string;
+}) {
+  const name = firstNameOf(input.firstName);
+  const reference = escapeHtml(input.reference);
+  const copy = BOOKING_STATUS_EMAIL[input.status];
+  const event = `${escapeHtml(eventDateLabel(input.eventDate))} at ${escapeHtml(input.location)}`;
+  return sendMail({
+    to: input.to,
+    subject: `${copy.subject} (${reference})`,
+    html: shell(
+      copy.heading,
+      `<p>Hi ${name},</p>
+       <p>${copy.body} Your booking is for <strong>${event}</strong>.</p>
+       <p>You can see the request and any updates from your dashboard.</p>`,
+      { label: "View my booking", url: input.bookingUrl },
+    ),
+    text: `Hi ${input.firstName.trim() || "there"}, ${copy.text} for ${eventDateLabel(input.eventDate)} at ${input.location} (${reference}). View it at ${input.bookingUrl}`,
   });
 }

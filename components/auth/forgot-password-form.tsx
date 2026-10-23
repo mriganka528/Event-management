@@ -82,13 +82,13 @@ function Flow({ onBack }: { onBack: () => void }) {
 
         <AuthFeedback state={requestState} />
 
-        <Button type="submit" disabled={requesting}>
+        <Button type="submit" disabled={requesting} aria-busy={requesting || undefined}>
           {requesting ? (
             <Loader2 className="mr-2 h-4 w-4 animate-spin" aria-hidden="true" />
           ) : (
             <Mail className="mr-2 h-4 w-4" aria-hidden="true" />
           )}
-          Send me a reset code
+          {requesting ? "Sending your reset code…" : "Send me a reset code"}
         </Button>
       </form>
     );
@@ -127,13 +127,13 @@ function Flow({ onBack }: { onBack: () => void }) {
         <AuthFeedback state={codeState} />
 
         <div className="flex flex-wrap items-center gap-3">
-          <Button type="submit" disabled={verifying || code.length !== 6}>
+          <Button type="submit" disabled={verifying || code.length !== 6} aria-busy={verifying || undefined}>
             {verifying ? (
               <Loader2 className="mr-2 h-4 w-4 animate-spin" aria-hidden="true" />
             ) : (
               <ArrowRight className="mr-2 h-4 w-4" aria-hidden="true" />
             )}
-            Verify and choose a new password
+            {verifying ? "Verifying your code…" : "Verify and choose a new password"}
           </Button>
           <Button type="button" variant="ghost" size="sm" onClick={onBack}>
             <RefreshCw className="mr-2 h-4 w-4" aria-hidden="true" />

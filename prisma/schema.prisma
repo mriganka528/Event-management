@@ -1,5 +1,6 @@
 generator client {
-  provider = "prisma-client-js"
+  provider        = "prisma-client-js"
+  previewFeatures = ["relationJoins"]
 }
 
 datasource db {
@@ -68,6 +69,22 @@ enum PaymentStatus {
   REFUNDED
 }
 
+/**
+ * How much of the booking total the team has asked the customer to settle.
+ *
+ * Stored as a *target* on the booking (see `paymentRequestTargetAmount`) rather
+ * than a one-off amount, so a partial payment leaves a smaller remainder instead
+ * of the full request appearing again.
+ */
+enum PaymentRequestMode {
+  /// A deposit: 25% of the booking total.
+  ADVANCE
+  /// Half of what is still owed, not half of the original total.
+  HALF
+  /// Everything still outstanding.
+  FULL
+}
+
 enum PaymentOrderStatus {
   CREATED
   PAID
@@ -79,6 +96,9 @@ enum PaymentOrderStatus {
 enum PricingMode {
   FIXED
   PER_GUEST
+  /// Charged once per day of the event, so a three-day function bills the daily
+  /// rate three times and draws its stock for each of those days.
+  PER_DAY
 }
 
 enum NotificationAudience {
@@ -90,6 +110,8 @@ enum NotificationType {
   BOOKING_APPROVED
   BOOKING_REJECTED
   PAYMENT_RECEIVED
+  /// The team asked the customer for an advance, half, or the full balance.
+  PAYMENT_REQUESTED
   EVENT_REMINDER
   NEW_BOOKING_REQUEST
   LOW_INVENTORY
@@ -109,6 +131,32 @@ enum InventoryCategory {
   DECORATION
   CATERING
   PHOTOGRAPHY
+  /// Cloth and soft furnishing: tablecloths, chair covers, carpets, draping.
+  LINEN
+  /// Power distribution and generators: extension cables, power strips,
+  /// distribution boards, junction boxes, diesel generators.
+  ELECTRICAL
+  /// Anything that changes the temperature: pedestal and wall fans, air coolers,
+  /// room heaters, air conditioners.
+  CLIMATE_CONTROL
+  /// Crockery and cutlery that is counted rather than consumed: plates, bowls,
+  /// glasses, steel dishes.
+  GLASSWARE
+  /// Printed and structural signage: banners, standees, roll-ups, backdrops,
+  /// direction boards.
+  DISPLAY
+  /// Projectors, projector screens, LED TVs, and playback hardware. Lenses and
+  /// stills photography stay in `PHOTOGRAPHY`.
+  VIDEO
+  /// Emergency and compliance kit: fire extinguishers, first aid boxes,
+  /// emergency lights, exit signs.
+  SAFETY
+  /// Consumables kept in stock for turnaround: mops, buckets, dustbins,
+  /// vacuum cleaners, pressure washers.
+  CLEANING
+  /// Workshop kit used to build and repair on site: ladders, ropes, tool boxes,
+  /// cable ties, drills.
+  HARDWARE
 }
 
 enum AdminRequestStatus {
@@ -156,6 +204,10 @@ enum SecurityEventType {
   DEVICE_SESSION_REVOKED
   DEVICE_LIMIT_REACHED
   BLOCKED_ROUTE_ATTEMPT
+  /// A super admin erased a customer's personal details. Their bookings,
+  /// payments, and invoices were deliberately left in place — see
+  /// `removeCustomerAccess` in lib/access-management.ts.
+  CUSTOMER_REMOVED
 }
 
 /// Where a one-time code is delivered.
@@ -419,7 +471,18 @@ model Service {
   basePrice         Decimal            @db.Decimal(10, 2)
   unitLabel         String             @default("unit")
   pricingMode       PricingMode        @default(FIXED)
-  inventoryCategory InventoryCategory?
+  /// Stock categories this service draws on, one unit from *each* of them.
+  ///
+  /// A list rather than a single column because most services in this trade need
+  /// more than one kind of thing: a table-and-chair arrangement draws a table and
+  /// a chair per unit, and a buffet station draws crockery and a counter. Filing
+  /// it under one category left the other invisible, so the reservation that
+  /// guards stock never saw it — the arrangement could be booked against 200
+  /// chairs with no tables in the building.
+  ///
+  /// Kept as a Postgres enum array rather than a join table: there is nothing to
+  /// hang metadata off, and every read here wants the whole list at once.
+  inventoryCategories InventoryCategory[] @default([])
   imageUrl          String?
   imagePublicId     String?
   isActive          Boolean            @default(true)
@@ -470,6 +533,11 @@ model Booking {
   eventDate               DateTime
   location                String
   guestCount              Int
+  /// How many days the event runs for. Only `PER_DAY` services read it, but it is
+  /// stored on the booking rather than recomputed from the form so that approval,
+  /// invoicing, and the inventory re-check all bill and reserve the same days the
+  /// customer asked for.
+  durationDays            Int                @default(1)
   notes                   String?
   status                  BookingStatus      @default(PENDING)
   subtotal                Decimal            @db.Decimal(10, 2)
@@ -478,6 +546,12 @@ model Booking {
   paidAmount              Decimal            @default(0) @db.Decimal(10, 2)
   balanceAmount           Decimal            @db.Decimal(10, 2)
   reservedPaymentAmount   Decimal            @default(0) @db.Decimal(10, 2)
+  /// Set when the team asks for a payment. The target is cumulative: it is what
+  /// `paidAmount` should reach. "Half" is half of the *remaining balance*, so a
+  /// ₹75,225 balance produces a ₹37,612.50 request, not 25% of the original total.
+  paymentRequestMode         PaymentRequestMode?
+  paymentRequestTargetAmount Decimal?           @db.Decimal(10, 2)
+  paymentRequestedAt         DateTime?
   idempotencyKey          String?            @unique
   idempotencyHash         String?
   publicToken             String?            @unique
@@ -638,6 +712,12 @@ model Notification {
   type      NotificationType
   title     String
   message   String
+  /// Where this notification points. Persisted rather than derived from the
+  /// type, because the same type can point at different places: a booking
+  /// request goes to the pending list, but a cash payment awaiting approval
+  /// goes to the approvals screen. Without it the reader has no way to reach
+  /// the task the notification is about.
+  href      String?
   read      Boolean              @default(false)
   createdAt DateTime             @default(now())
 
@@ -653,6 +733,12 @@ model BusinessSetting {
   city         String   @default("")
   taxRate      Decimal  @default(0.18) @db.Decimal(4, 2)
   currency     String   @default("INR")
+  /// The logo shown in the public header. Stored as the URL/`publicId` pair every
+  /// other Cloudinary asset in this schema uses, so it is validated, and replaced,
+  /// by the same rules — and so an old asset can be destroyed on replacement
+  /// rather than left orphaned in the bucket.
+  logoUrl      String?
+  logoPublicId String?
   createdAt    DateTime @default(now())
   updatedAt    DateTime @updatedAt
 }

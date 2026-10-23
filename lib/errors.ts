@@ -78,10 +78,32 @@ export function toFriendlyError(error: unknown, fallback = "Something went wrong
     // the human-readable version instead of showing the raw JSON.
     const recovered = fromZodLike(error.message);
     if (recovered) return recovered;
+    // A database error names tables, columns, and constraints. Those details
+    // describe the schema rather than the mistake, and they help nobody except
+    // whoever is probing the schema, so they are replaced with something that
+    // says what went wrong without saying how the data is stored.
+    if (isDatabaseError(error)) {
+      return fallback;
+    }
     if (error.message) return error.message;
   }
   if (typeof error === "string" && error.trim()) {
     return fromZodLike(error) ?? error.trim();
   }
   return fallback;
+}
+
+/**
+ * Whether an error came from the database driver rather than from this code.
+ *
+ * Prisma errors carry a `code` such as `P2002` and a `meta` object, and their
+ * messages read like `Invalid \`prisma.user.create()\` invocation:` followed by
+ * the arguments and the constraint that failed. Those messages are written for
+ * a developer reading a terminal, not for somebody filling in a form.
+ */
+function isDatabaseError(error: Error) {
+  const code = (error as { code?: unknown }).code;
+  if (typeof code === "string" && /^P\d{4}$/.test(code)) return true;
+  const name = error.name;
+  return typeof name === "string" && name.startsWith("PrismaClient");
 }

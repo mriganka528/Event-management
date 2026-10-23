@@ -1,4 +1,5 @@
 import Link from "next/link";
+import type { Metadata } from "next";
 import { BookingStatus } from "@prisma/client";
 import { CalendarDays, ChevronLeft, ChevronRight, Clock3, IndianRupee, MapPin, Users } from "lucide-react";
 import { getAdminBookings } from "@/lib/admin-bookings";
@@ -11,6 +12,8 @@ import {
   isCalendarFilter,
   isSameDay,
   isWeekend,
+  istDayOfMonth,
+  istParts,
   monthKey,
   parseDayKey,
   parseMonthKey,
@@ -19,6 +22,7 @@ import {
   type CalendarFilter,
 } from "@/lib/calendar";
 import { formatCurrency, formatDate } from "@/lib/utils";
+import { formatIstDateLong, formatIstDateWithWeekday, formatIstTime, IST_TIMEZONE } from "@/lib/ist";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
@@ -27,8 +31,15 @@ import { PendingLink } from "@/components/admin/pending-link";
 
 export const dynamic = "force-dynamic";
 
+export const metadata: Metadata = {
+  title: "Calendar",
+  description: "A month view of every scheduled event, its time, and its location.",
+  robots: { index: false, follow: false, nocache: true },
+};
+
 function monthLabel(date: Date) {
-  return date.toLocaleDateString("en-IN", { month: "long", year: "numeric" });
+  // IST, like every other date the business shows. See `lib/ist.ts`.
+  return new Intl.DateTimeFormat("en-IN", { month: "long", year: "numeric", timeZone: IST_TIMEZONE }).format(date);
 }
 
 type SearchParams = Promise<{ month?: string; status?: string; day?: string }>;
@@ -37,8 +48,9 @@ export default async function CalendarPage({ searchParams }: { searchParams: Sea
   const params = await searchParams;
   const today = new Date();
   const current = parseMonthKey(params.month, today);
-  const year = current.getFullYear();
-  const month = current.getMonth();
+  // The year and month are read in IST, so the grid is the one the business
+  // would draw on a wall calendar. See `lib/ist.ts`.
+  const { year, month } = istParts(current);
   const filter: CalendarFilter = isCalendarFilter(params.status) ? params.status : "ALL";
   const selectedDate = parseDayKey(params.day);
 
@@ -47,8 +59,8 @@ export default async function CalendarPage({ searchParams }: { searchParams: Sea
   const cells = buildMonthGrid(year, month);
 
   const monthBookings = bookings.filter((booking) => {
-    const date = new Date(booking.eventDate);
-    return date.getFullYear() === year && date.getMonth() === month;
+    const parts = istParts(new Date(booking.eventDate));
+    return parts.year === year && parts.month === month;
   });
 
   const visibleBookings = filter === "ALL" ? monthBookings : monthBookings.filter((booking) => booking.status === filter);
@@ -71,7 +83,8 @@ export default async function CalendarPage({ searchParams }: { searchParams: Sea
 
   const previous = addMonths(current, -1);
   const next = addMonths(current, 1);
-  const isCurrentMonth = year === today.getFullYear() && month === today.getMonth();
+  const todayParts = istParts(today);
+  const isCurrentMonth = year === todayParts.year && month === todayParts.month;
 
   function navHref(nextMonth: Date, nextFilter: CalendarFilter = filter, day?: string) {
     const query = new URLSearchParams({ month: monthKey(nextMonth), status: nextFilter });
@@ -87,8 +100,8 @@ export default async function CalendarPage({ searchParams }: { searchParams: Sea
     .filter((booking) => !["PENDING", "CANCELLED", "REJECTED"].includes(booking.status))
     .reduce((sum, booking) => sum + Number(booking.totalAmount), 0);
   const monthEvents = events.filter((event) => {
-    const date = new Date(event.startDate);
-    return date.getFullYear() === year && date.getMonth() === month;
+    const parts = istParts(new Date(event.startDate));
+    return parts.year === year && parts.month === month;
   });
 
   const selectedBookings = selectedDate ? (bookingsByDay.get(dayKey(selectedDate)) ?? []) : [];
@@ -178,7 +191,7 @@ export default async function CalendarPage({ searchParams }: { searchParams: Sea
                         className={`inline-flex h-7 min-w-7 items-center justify-center rounded-full px-1.5 text-sm font-semibold transition hover:bg-[var(--surface)] ${isToday ? "bg-amber-500 text-stone-950" : inMonth ? "text-[var(--foreground)]" : "text-[var(--muted)]"}`}
                         aria-label={`View ${date.toDateString()}`}
                       >
-                        {date.getDate()}
+                        {istDayOfMonth(date)}
                       </Link>
                       {isToday ? <span className="h-1.5 w-1.5 rounded-full bg-amber-500 sm:hidden" aria-hidden="true" /> : null}
                     </div>
@@ -217,9 +230,9 @@ export default async function CalendarPage({ searchParams }: { searchParams: Sea
                 <div key={`agenda-${dayKey(date)}`} className="rounded-2xl border border-[var(--line)] p-3">
                   <div className="flex items-center gap-2">
                     <span className={`inline-flex h-8 w-8 items-center justify-center rounded-full text-sm font-semibold ${isSameDay(date, today) ? "bg-amber-500 text-stone-950" : "bg-[var(--surface-muted)] text-[var(--foreground)]"}`}>
-                      {date.getDate()}
+                      {istDayOfMonth(date)}
                     </span>
-                    <p className="text-sm font-semibold">{date.toLocaleDateString("en-IN", { weekday: "short", day: "numeric", month: "short" })}</p>
+                    <p className="text-sm font-semibold">{formatIstDateWithWeekday(date)}</p>
                   </div>
                   <div className="mt-2 grid gap-1.5">
                     {dayBookings.map((booking) => (
@@ -231,7 +244,7 @@ export default async function CalendarPage({ searchParams }: { searchParams: Sea
                     {dayEvents.map((event) => (
                       <Link key={event.id} href={`/admin/bookings/${event.bookingId}`} className="flex items-center justify-between gap-2 rounded-xl bg-[var(--surface-muted)] px-2.5 py-1.5 text-xs font-medium text-[var(--muted)]">
                         <span className="truncate">{event.title}</span>
-                        <span className="shrink-0 opacity-70">{new Date(event.startDate).toLocaleTimeString("en-IN", { hour: "numeric", minute: "2-digit" })}</span>
+                        <span className="shrink-0 opacity-70">{formatIstTime(event.startDate)}</span>
                       </Link>
                     ))}
                   </div>
@@ -246,7 +259,7 @@ export default async function CalendarPage({ searchParams }: { searchParams: Sea
         <Card className="border-amber-300">
           <CardHeader className="flex-row flex-wrap items-center justify-between gap-3">
             <div className="min-w-0">
-              <CardTitle className="text-xl">{selectedDate.toLocaleDateString("en-IN", { weekday: "long", day: "numeric", month: "long", year: "numeric" })}</CardTitle>
+              <CardTitle className="text-xl">{formatIstDateLong(selectedDate)}</CardTitle>
               <CardDescription>{selectedBookings.length} booking{selectedBookings.length === 1 ? "" : "s"} · {selectedEvents.length} event record{selectedEvents.length === 1 ? "" : "s"}</CardDescription>
             </div>
             <Link href={navHref(current, filter)}><Button variant="outline" size="sm">Clear selection</Button></Link>
@@ -277,7 +290,7 @@ export default async function CalendarPage({ searchParams }: { searchParams: Sea
                     <div className="min-w-0">
                       <p className="font-semibold">{event.title}</p>
                       <p className="mt-1 flex flex-wrap items-center gap-x-3 gap-y-1 text-sm text-[var(--muted)]">
-                        <span className="inline-flex items-center gap-1"><Clock3 className="h-3.5 w-3.5" />{new Date(event.startDate).toLocaleTimeString("en-IN", { hour: "numeric", minute: "2-digit" })} – {new Date(event.endDate).toLocaleTimeString("en-IN", { hour: "numeric", minute: "2-digit" })}</span>
+                        <span className="inline-flex items-center gap-1"><Clock3 className="h-3.5 w-3.5" />{formatIstTime(event.startDate)} – {formatIstTime(event.endDate)}</span>
                         <span className="inline-flex items-center gap-1"><MapPin className="h-3.5 w-3.5" />{event.location}</span>
                       </p>
                     </div>

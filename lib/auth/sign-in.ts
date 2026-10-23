@@ -3,7 +3,7 @@ import "server-only";
 import { AccountStatus, OtpChannel, OtpPurpose, RoleKey } from "@prisma/client";
 import { prisma } from "@/lib/prisma";
 import { hashPassword, verifyPassword } from "@/lib/auth/password";
-import { issueOtp, verifyOtp, type IssueOtpResult } from "@/lib/auth/otp";
+import { issueOtp, verifyOtp, OtpError, type IssueOtpResult } from "@/lib/auth/otp";
 import { clearPendingTwoFactor, setPendingTwoFactor, type AuthUser } from "@/lib/auth/server";
 import { createSession, currentRequestInfo, maxDevices, revokeSession, setSessionCookies, clearSessionCookies, DeviceLimitError } from "@/lib/auth/session";
 import { isPhoneOtpEnabled, normalisePhone } from "@/lib/auth/sms";
@@ -51,7 +51,17 @@ export type SignInErrorCode =
   /// sends them round in a circle resetting a password that was never the
   /// problem.
   | "CODE_NOT_SENT"
-  | "CODE_RATE_LIMITED";
+  | "CODE_RATE_LIMITED"
+  /// Rejections from step 2. The password behind this screen was already
+  /// accepted, so every one of these is about the code and nothing else: the
+  /// user is sitting on the OTP screen with a working password, and telling them
+  /// the email and password combination is wrong makes them re-type a password
+  /// that was right, or go and reset one that was never the problem. The split
+  /// also tells them what to do next — retype the code, or ask for a new one.
+  | "INVALID_CODE"
+  | "CODE_EXPIRED"
+  | "CODE_ATTEMPTS_EXCEEDED"
+  | "CODE_SUPERSEDED";
 
 function friendlyMessage(code: SignInErrorCode): string {
   switch (code) {
@@ -81,7 +91,48 @@ function friendlyMessage(code: SignInErrorCode): string {
       return "Your password was correct, but the sign-in code could not be sent. Try again in a minute.";
     case "CODE_RATE_LIMITED":
       return "Too many codes have been requested for this account. Wait an hour before asking for another.";
+    case "INVALID_CODE":
+      return "That code is not correct. Check it and try again.";
+    case "CODE_EXPIRED":
+      return "That code has expired. Request a new one.";
+    case "CODE_ATTEMPTS_EXCEEDED":
+      return "Too many incorrect attempts. Request a new code.";
+    case "CODE_SUPERSEDED":
+      return "That code is no longer valid. Request a new one.";
   }
+}
+
+/**
+ * Describes a rejected sign-in code.
+ *
+ * The password behind the OTP screen was accepted in step 1, so this must never
+ * come back as `INVALID_CREDENTIALS` — the same rule `CODE_NOT_SENT` follows on
+ * the issuance side. Each outcome gets its own code and wording, because they
+ * call for different things: retype the code, wait for a new one, or stop
+ * guessing and request a fresh code.
+ *
+ * The message from the OTP layer is kept where there is one, because it carries
+ * the attempts-left countdown that tells the user a further guess is still
+ * allowed. Anything else falls back to the generic wording rather than being
+ * passed through, so an unexpected throw cannot leak internals.
+ */
+function otpFailure(error: unknown): { code: SignInErrorCode; message: string } {
+  const otpCode = error instanceof OtpError ? error.code : null;
+  let code: SignInErrorCode = "INVALID_CODE";
+  switch (otpCode) {
+    case "EXPIRED":
+      code = "CODE_EXPIRED";
+      break;
+    case "TOO_MANY_ATTEMPTS":
+      code = "CODE_ATTEMPTS_EXCEEDED";
+      break;
+    case "NOT_FOUND":
+    case "ALREADY_USED":
+      code = "CODE_SUPERSEDED";
+      break;
+  }
+  const message = error instanceof OtpError && error.message ? error.message : friendlyMessage(code);
+  return { code, message };
 }
 
 async function recentFailures(identifier: string, ipAddress: string | null) {
@@ -97,8 +148,8 @@ async function logAttempt(identifier: string, ipAddress: string | null, successf
   await prisma.loginAttempt.create({ data: { identifier, ipAddress, successful } }).catch(() => undefined);
 }
 
-function fail(code: SignInErrorCode, status = 400): SignInResult {
-  return { ok: false, code, message: friendlyMessage(code), status } as SignInResult & { status?: number };
+function fail(code: SignInErrorCode, status = 400, message?: string): SignInResult {
+  return { ok: false, code, message: message ?? friendlyMessage(code), status } as SignInResult & { status?: number };
 }
 
 /** Step 1 of sign-in: password verification, then OTP issuance. */
@@ -222,7 +273,12 @@ export async function completeSignIn(input: {
       ipAddress: input.ipAddress,
       detail: error instanceof Error ? error.message : "Invalid code.",
     });
-    return fail("INVALID_CREDENTIALS", 401);
+    // The password was accepted in step 1, so a failure here is about the code
+    // and only the code. Reporting INVALID_CREDENTIALS told the user their
+    // email and password were wrong when they were not, and pointed them at a
+    // password reset that could not fix anything.
+    const failure = otpFailure(error);
+    return fail(failure.code, 401, failure.message);
   }
 
   await recordSecurityEvent({ type: "TWO_FACTOR_VERIFIED", userId: account.id, email: account.email, ipAddress: input.ipAddress, detail: `Second factor satisfied over ${channel.toLowerCase()}.` });

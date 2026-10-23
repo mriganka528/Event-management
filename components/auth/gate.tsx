@@ -1,8 +1,8 @@
 import type { Metadata } from "next";
 import Link from "next/link";
 import { redirect } from "next/navigation";
-import { ShieldAlert, ShieldCheck, Hourglass, KeyRound, LogOut, ArrowLeft, RefreshCw } from "lucide-react";
-import { signOutAction } from "@/lib/auth-actions";
+import { ShieldAlert, ShieldCheck, Hourglass, KeyRound, ArrowLeft, RefreshCw } from "lucide-react";
+import { SignOutForm } from "@/components/auth/sign-out-form";
 import { ThemeToggle } from "@/components/marketing/theme-toggle";
 import { Button } from "@/components/ui/button";
 import { getAuthContext, HOME_BY_ROLE } from "@/lib/auth/server";
@@ -85,11 +85,7 @@ export function GateShell({
           <div className="flex items-center gap-2">
             <ThemeToggle />
             {showSignOut ? (
-              <form action={signOutAction}>
-                <Button type="submit" variant="outline" size="sm">
-                  <LogOut className="mr-2 h-4 w-4" />Sign out
-                </Button>
-              </form>
+              <SignOutForm />
             ) : null}
           </div>
         </div>

@@ -40,7 +40,7 @@ export type ClerkIdentity = {
   imageUrl: string | null;
 };
 
-export type FederateResult = { ok: true; userId: string; created: boolean } | { ok: false; reason: "EMAIL_TAKEN" | "ACCOUNT_BLOCKED" | "INVALID_EMAIL"; message: string };
+export type FederateResult = { ok: true; userId: string; created: boolean; firstSignIn: boolean } | { ok: false; reason: "EMAIL_TAKEN" | "ACCOUNT_BLOCKED" | "INVALID_EMAIL"; message: string };
 
 function normaliseEmail(raw: string): string | null {
   const email = raw.trim().toLowerCase();
@@ -62,7 +62,7 @@ export async function federateClerkCustomer(identity: ClerkIdentity, ipAddress: 
 
   // Already linked: refresh the mutable profile fields only. Role, status and
   // approval are deliberately absent from this update.
-  const linked = await prisma.user.findUnique({ where: { clerkId }, select: { id: true, email: true } });
+  const linked = await prisma.user.findUnique({ where: { clerkId }, select: { id: true, email: true, lastLoginAt: true } });
   if (linked) {
     if (linked.email === email) {
       await prisma.user.update({
@@ -82,12 +82,12 @@ export async function federateClerkCustomer(identity: ClerkIdentity, ipAddress: 
         data: { email, firstName: identity.firstName, lastName: identity.lastName, avatarUrl: identity.imageUrl, emailVerifiedAt: new Date() },
       });
     }
-    return { ok: true, userId: linked.id, created: false };
+    return { ok: true, userId: linked.id, created: false, firstSignIn: !linked.lastLoginAt };
   }
 
   const byEmail = await prisma.user.findUnique({
     where: { email },
-    select: { id: true, clerkId: true, isActive: true, accountStatus: true, firstName: true, lastName: true, avatarUrl: true, role: { select: { key: true } } },
+    select: { id: true, clerkId: true, isActive: true, accountStatus: true, firstName: true, lastName: true, avatarUrl: true, lastLoginAt: true, role: { select: { key: true } } },
   });
 
   // The decision itself is a pure policy so it can be unit-tested; see
@@ -128,7 +128,7 @@ export async function federateClerkCustomer(identity: ClerkIdentity, ipAddress: 
       },
     });
     await recordSecurityEvent({ type: "ACCESS_REQUEST_SUBMITTED", userId: byEmail.id, email, ipAddress, detail: "Existing customer account linked to a third-party identity." });
-    return { ok: true, userId: byEmail.id, created: false };
+    return { ok: true, userId: byEmail.id, created: false, firstSignIn: !byEmail.lastLoginAt };
   }
 
   const role = await prisma.role.findUnique({ where: { key: RoleKey.CUSTOMER }, select: { id: true } });
@@ -155,7 +155,7 @@ export async function federateClerkCustomer(identity: ClerkIdentity, ipAddress: 
   });
 
   await recordSecurityEvent({ type: "ACCESS_REQUEST_SUBMITTED", userId: user.id, email, ipAddress, detail: "Customer account created from a third-party identity." });
-  return { ok: true, userId: user.id, created: true };
+  return { ok: true, userId: user.id, created: true, firstSignIn: true };
 }
 
 /** Reads the Clerk identity for the current request, or null when signed out. */

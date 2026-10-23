@@ -106,3 +106,77 @@ test("the role label helper is usable from both sides", () => {
     );
   }
 });
+
+/**
+ * The other direction across the same boundary: not a *call* into a client
+ * module, but a *prop* carrying one.
+ *
+ *   Error: Functions cannot be passed directly to Client Components unless you
+ *   explicitly expose it by marking it with "use server".
+ *
+ * The landing page did this with `renderItem={(item) => <Card … />}` on the
+ * packages and gallery carousels: the page is a Server Component and `Carousel`
+ * is a client one, so the arrow function had nowhere to cross. It compiled, type
+ * checked, and threw on every visit to `/`.
+ *
+ * It is only legal *between* client components, where a render prop is a normal
+ * prop — so the fix is a client wrapper that owns the markup and takes plain data,
+ * not a `"use server"` on the callback.
+ */
+test("no server component hands a function to a client component", () => {
+  /** Names a server file imports from a "use client" module. */
+  function clientImports(file: string): Set<string> {
+    const names = new Set<string>();
+    const source = readFileSync(file, "utf8");
+    for (const m of source.matchAll(/import\s+(?!type\s)\{([^}]*)\}\s+from\s+"@\/([^"]+)"/g)) {
+      const resolved = join(root, m[2].slice(2));
+      if (!existsSync(resolved) || !isClientModule(resolved)) continue;
+      for (const part of m[1].split(",")) {
+        const name = part.trim().split(/\s+as\s+/).pop()?.trim();
+        // Only components: a lowercase helper is the *call* guard's business.
+        if (name && /^[A-Z]/.test(name)) names.add(name);
+      }
+    }
+    return names;
+  }
+
+  const problems: string[] = [];
+  for (const file of files) {
+    if (!/\.tsx$/.test(file) || isClientModule(file)) continue;
+    const source = readFileSync(file, "utf8");
+
+    for (const name of clientImports(file)) {
+      for (const element of source.matchAll(new RegExp(`<${name}\\b([\\s\\S]*?)(?:/>|</${name}>)`, "g"))) {
+        for (const prop of element[1].matchAll(/\s([a-zA-Z][a-zA-Z0-9]*)=\{/g)) {
+          // `children` is markup, and markup crosses the boundary fine.
+          if (prop[1] === "children") continue;
+          const value = element[1].slice(prop.index + prop[0].length - 1);
+          if (/^\s*(?:\(\s*[\w$]*\s*\)?\s*=>|async\s*\(|function\b|[A-Za-z_$][\w$]*\s*=>)/.test(value)) {
+            problems.push(`${file}: <${name} ${prop[1]}={…}>`);
+          }
+        }
+      }
+    }
+  }
+
+  assert.deepEqual(
+    problems,
+    [],
+    `only serialisable props cross into a client component — wrap the render in a client component instead:\n  ${problems.join("\n  ")}`,
+  );
+});
+
+test("the carousels render on the client side of the boundary", () => {
+  // The wrappers that fixed it: each one owns the markup, and the page passes
+  // data. `Carousel` keeps its render prop, which is legal between two clients.
+  const page = readFileSync("app/(root)/page.tsx", "utf8");
+  assert.doesNotMatch(page, /<Carousel\b/, "the landing page must not call the carousel directly");
+  assert.match(page, /<PackageCarousel packages=\{packages\}/);
+  assert.match(page, /<GalleryCarousel images=\{galleryImages\}/);
+
+  for (const wrapper of ["components/marketing/package-carousel.tsx", "components/marketing/gallery-carousel.tsx"]) {
+    const source = readFileSync(wrapper, "utf8");
+    assert.ok(isClientModule(wrapper), `${wrapper} must be a client module, or the render prop cannot cross`);
+    assert.match(source, /renderItem=/, `${wrapper} should own the markup rather than push it back up`);
+  }
+});

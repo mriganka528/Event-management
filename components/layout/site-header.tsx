@@ -1,4 +1,5 @@
 import Link from "next/link";
+import Image from "next/image";
 import { ArrowRight } from "lucide-react";
 import { ThemeToggle } from "@/components/marketing/theme-toggle";
 import { PublicHeaderMenu } from "@/components/layout/public-header-menu";
@@ -16,6 +17,9 @@ export const PUBLIC_NAV: readonly PublicNavItem[] = [
   { href: "/services", label: "Services" },
   { href: "/#gallery", label: "Gallery" },
   { href: "/contact", label: "Contact" },
+  // The terms have to be reachable from the header as well as the footer: a
+  // customer agreeing to a quote is agreeing to terms they were able to read.
+  { href: "/terms", label: "Terms" },
 ];
 
 /**
@@ -35,19 +39,34 @@ export const PUBLIC_NAV: readonly PublicNavItem[] = [
  */
 export function SiteHeader({
   businessName = "Event Management",
+  logoUrl = null,
   nav,
 }: {
   businessName?: string;
+  /**
+   * The business logo, uploaded on the admin settings screen and stored in
+   * Cloudinary like every other asset. Optional: a business that has not uploaded
+   * one gets the name on its own, which is what the header did before logos
+   * existed and must keep doing — a missing image is not a reason to render an
+   * empty box where the business name should be.
+   */
+  logoUrl?: string | null;
   nav?: readonly PublicNavItem[];
 }) {
   const navItems = nav ?? PUBLIC_NAV;
+  const name = businessName || "Event Management";
 
   return (
     <PublicAccountProvider>
       <header className="container-shell sticky top-3 z-40 pt-3 sm:top-4 sm:pt-4">
         <div className="glass-panel flex items-center justify-between gap-3 rounded-3xl border border-[var(--line)] px-3 py-2.5 shadow-sm sm:rounded-full sm:px-5 sm:py-3">
-          <Link href="/" className="min-w-0 shrink-0 text-base font-semibold tracking-tight text-[var(--foreground)] sm:text-lg">
-            <span className="block max-w-[9rem] truncate sm:max-w-none">{businessName || "Event Management"}</span>
+          <Link href="/" className="flex min-w-0 shrink-0 items-center gap-2.5 text-base font-semibold tracking-tight text-[var(--foreground)] sm:text-lg">
+            {logoUrl ? (
+              // `alt` is the business name, not "logo": that is what the image
+              // *is* to somebody using a screen reader or when the image fails.
+              <Image src={logoUrl} alt={name} width={40} height={40} sizes="40px" className="h-10 w-10 shrink-0 rounded-xl object-contain" />
+            ) : null}
+            <span className="block max-w-[9rem] truncate sm:max-w-none">{name}</span>
           </Link>
 
           <nav className="hidden items-center gap-5 text-sm text-[var(--muted)] lg:flex xl:gap-6">

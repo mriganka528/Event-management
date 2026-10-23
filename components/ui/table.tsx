@@ -1,8 +1,18 @@
 import * as React from "react";
 import { cn } from "@/lib/utils";
 
+/**
+ * Every table in the app sits inside an `overflow-x-auto` container, which makes
+ * it safe to put a width floor on the element itself.
+ *
+ * Without one, the auto layout has to fit every column inside the viewport and
+ * squeezes them until short words break mid-word — "category" rendered as
+ * "cate" / "gory". With a floor the container scrolls sideways instead and each
+ * column keeps the width its content actually needs. A page with more columns
+ * raises the floor with `className`, which tailwind-merge lets win.
+ */
 export function Table({ className, ...props }: React.TableHTMLAttributes<HTMLTableElement>) {
-  return <table className={cn("w-full caption-bottom text-sm", className)} {...props} />;
+  return <table className={cn("w-full min-w-[40rem] caption-bottom text-sm", className)} {...props} />;
 }
 
 export function TableHeader({ className, ...props }: React.HTMLAttributes<HTMLTableSectionElement>) {
@@ -17,8 +27,9 @@ export function TableRow({ className, ...props }: React.HTMLAttributes<HTMLTable
   return <tr className={cn("border-b border-[var(--line)]", className)} {...props} />;
 }
 
+// Headings are one or two short words and never need to wrap.
 export function TableHead({ className, ...props }: React.ThHTMLAttributes<HTMLTableCellElement>) {
-  return <th className={cn("h-12 px-4 text-left font-medium text-[var(--muted)]", className)} {...props} />;
+  return <th className={cn("h-12 px-4 text-left font-medium whitespace-nowrap text-[var(--muted)]", className)} {...props} />;
 }
 
 export function TableCell({ className, ...props }: React.TdHTMLAttributes<HTMLTableCellElement>) {

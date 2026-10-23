@@ -51,6 +51,30 @@ test("toNotificationView normalises dates and defaults the href", () => {
   assert.equal(view.read, false);
 });
 
+test("the stored link wins over the per-type default", () => {
+  /*
+   * The link is recorded when the event happens, so it can point at the exact
+   * screen the alert is about. A cash payment awaiting approval and a
+   * recorded payment are both about money, but only one of them is about
+   * waiting for approval, and the reader has to be able to get to it.
+   */
+  const view = toNotificationView(
+    { id: "n2", title: "Cash payment awaiting approval", message: "Approve it", type: "PAYMENT_REQUESTED", read: false, createdAt: new Date("2026-01-02T03:04:05.000Z"), href: "/admin/payments" },
+    "ADMIN",
+  );
+  assert.equal(view.href, "/admin/payments");
+});
+
+test("a notification without a stored link still gets one", () => {
+  // Rows written before the column existed, or created without a link, must
+  // not end up pointing nowhere.
+  const view = toNotificationView(
+    { id: "n3", title: "New booking request", message: "Someone booked", type: "NEW_BOOKING_REQUEST", read: false, createdAt: new Date("2026-01-02T03:04:05.000Z"), href: null },
+    "ADMIN",
+  );
+  assert.equal(view.href, "/admin/bookings?status=PENDING");
+});
+
 test("staff roles offered at approval are the supported staff types", () => {
   const options = Object.values(StaffType);
   assert.deepEqual(options.sort(), ["DECORATOR", "DRIVER", "ELECTRICIAN", "TENT_INSTALLER"]);

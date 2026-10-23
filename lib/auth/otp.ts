@@ -1,6 +1,6 @@
 import "server-only";
 
-import { randomInt } from "node:crypto";
+import { randomInt, timingSafeEqual } from "node:crypto";
 import { OtpChannel, OtpPurpose } from "@prisma/client";
 import { prisma } from "@/lib/prisma";
 import { sha256 } from "@/lib/auth/password";
@@ -44,6 +44,23 @@ export class OtpError extends Error {
     super(message ?? code);
     this.code = code;
   }
+}
+
+/**
+ * Compares two hashes without leaking how many leading characters matched.
+ *
+ * A plain `!==` on strings short-circuits at the first differing byte, so the
+ * time it takes tells an attacker how much of the hash they guessed right.
+ * The code being compared is only six digits, and the challenge is burned
+ * after five wrong attempts, so the practical exposure is small — but this is
+ * the one secret comparison in the codebase that was not constant-time, and
+ * leaving it that way is the kind of gap that gets copied elsewhere later.
+ */
+function hashesMatch(left: string, right: string) {
+  const a = Buffer.from(left, "utf8");
+  const b = Buffer.from(right, "utf8");
+  if (a.length !== b.length) return false;
+  return timingSafeEqual(a, b);
 }
 
 function generateNumericCode(): string {
@@ -194,7 +211,7 @@ export async function verifyOtp(input: {
     throw new OtpError("TOO_MANY_ATTEMPTS", "Too many incorrect attempts. Request a new code.");
   }
 
-  if (sha256(code) !== challenge.codeHash) {
+  if (!hashesMatch(sha256(code), challenge.codeHash)) {
     const updated = await prisma.otpChallenge.update({
       where: { id: challenge.id },
       data: { attempts: { increment: 1 } },

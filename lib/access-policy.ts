@@ -82,6 +82,39 @@ export function isPasswordRequired(account: {
   return account.mustSetPassword || !account.passwordHash;
 }
 
+/**
+ * True when this account is a customer *record* rather than an identity: a
+ * customer with nothing to sign in with.
+ *
+ * The public booking form creates exactly this. An enquiry from an address with
+ * no account gets a customer record so the booking has somewhere to attach, and
+ * that record is created deliberately without a login — see
+ * `getOrCreatePublicCustomer` in `lib/bookings.ts`. The next enquiry from the same
+ * address was then refused with "sign in with the account email", advice that
+ * record can never follow: no password, no provider identity, nothing to sign in
+ * *with*. A customer who asked twice could not ask a third time, and the form is
+ * the only way for them to reach the business at all.
+ *
+ * Such a record holds no identity to take over. It has no credentials, so
+ * claiming the address takes nothing from its owner, and its history is visible to
+ * an administrator rather than to whoever submits the form. Reusing it is also
+ * what the first enquiry already implied: one customer record per address, made on
+ * demand.
+ *
+ * Everything with a sign-in behind it is excluded, deliberately and by the same
+ * rule the rest of this file uses — a self-registered customer with a password, an
+ * invited team member still on `must-set-password`, and a Clerk-federated account,
+ * which signs in through the provider and has no hash to find.
+ */
+export function isSignInlessCustomerRecord(account: {
+  role: RoleKey;
+  mustSetPassword: boolean;
+  passwordHash: string | null;
+  clerkId?: string | null;
+}) {
+  return account.role === RoleKey.CUSTOMER && isPasswordRequired({ mustSetPassword: account.mustSetPassword, passwordHash: account.passwordHash, clerkId: account.clerkId });
+}
+
 /** Admins and super admins must have two-factor authentication. */
 export function requiresMfa(role: RoleKey) {
   return isAdminRole(role);
@@ -164,9 +197,29 @@ export function canModifyAccount(reviewer: { id: string; role: RoleKey }, target
   return null;
 }
 
+/**
+ * Who may hand out a role.
+ *
+ * Administrator access is a super-admin decision, and this is the only place
+ * that rule is written down. Every path that creates or promotes an
+ * administrator already requires a super admin: the access-request review
+ * (`canReviewRoleRequest`), the direct invite (`inviteTeamMember`), and the
+ * promotion action (`grantAdminAccessAction`).
+ *
+ * The role-change form was the exception. The screen hides it from anybody who
+ * is not a super admin, but the action behind it was reachable by any admin,
+ * so an ordinary admin could promote somebody — themselves included, once
+ * `canModifyAccount` is satisfied — to administrator and hand out access that
+ * the rest of the codebase reserves for a super admin.
+ *
+ * Granting *super admin* is likewise refused to everybody but a super admin.
+ */
 export function canGrantRole(reviewerRole: RoleKey, nextRole: RoleKey) {
   if (nextRole === RoleKey.SUPER_ADMIN && reviewerRole !== RoleKey.SUPER_ADMIN) {
     return "Only a super admin can grant super admin access.";
+  }
+  if (nextRole === RoleKey.ADMIN && reviewerRole !== RoleKey.SUPER_ADMIN) {
+    return "Only a super admin can grant administrator access.";
   }
   return null;
 }
@@ -207,6 +260,35 @@ export function canRemoveAdmin(input: {
 export function canReviewRoleRequest(reviewerRole: RoleKey, requestedRole: RoleKey) {
   if (requestedRole === RoleKey.ADMIN && reviewerRole !== RoleKey.SUPER_ADMIN) {
     return "Only a super admin can approve administrator access.";
+  }
+  return null;
+}
+
+/**
+ * Who may erase a customer's personal details.
+ *
+ * This is not the same action as suspending, which is reversible and available
+ * to any admin: removing scrubs the name, contact details, credentials, and
+ * provider link for good. It is therefore super-admin-only.
+ *
+ * The target must actually be a customer. A staff or administrator account that
+ * happens to carry a `Customer` profile — someone demoted from the team, for
+ * instance — has to be handled through the access-control screen instead, where
+ * the role change and its consequences are the thing being recorded.
+ *
+ * The customer's *history* is not the target and is never touched; see
+ * `removeCustomerAccess` for why it cannot be.
+ */
+export function canRemoveCustomer(input: {
+  reviewer: { id: string; role: RoleKey };
+  target: { id: string; role: RoleKey };
+}) {
+  if (input.reviewer.role !== RoleKey.SUPER_ADMIN) {
+    return "Only a super admin can remove a customer record.";
+  }
+  if (input.target.id === input.reviewer.id) return "You cannot remove your own account.";
+  if (input.target.role !== RoleKey.CUSTOMER) {
+    return "This person is on the team. Remove their access from Access control instead.";
   }
   return null;
 }

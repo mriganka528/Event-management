@@ -1,7 +1,10 @@
 import { AccountStatus, RoleKey, StaffType } from "@prisma/client";
+import type { Metadata } from "next";
 import Link from "next/link";
 import { Check, Shield, ShieldAlert, ShieldCheck, UserCog, UserPlus, X } from "lucide-react";
 import { getAdminUsers } from "@/lib/admin-data";
+import { AdminSearch } from "@/components/admin/admin-search";
+import { normalizeQuery, rowFilter, rowText } from "@/lib/search";
 import { requireAdminPage } from "@/lib/route-guards";
 import {
   approveUserAccessFormAction,
@@ -20,9 +23,16 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/com
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { EmptyState } from "@/components/forms/empty-state";
 import { ActionForm } from "@/components/forms/action-form";
+import { ActionSubmitButton } from "@/components/forms/action-submit-button";
 import { RemoveAdminButton } from "./remove-admin-button";
 
 export const dynamic = "force-dynamic";
+
+export const metadata: Metadata = {
+  title: "Admins",
+  description: "Approve access requests and manage which accounts hold an administrator role.",
+  robots: { index: false, follow: false, nocache: true },
+};
 
 /**
  * All colours come from the design-system tokens in `app/globals.css` so the
@@ -49,8 +59,14 @@ const statusLabel: Record<AccountStatus, string> = {
   [AccountStatus.SUSPENDED]: "Suspended",
 };
 
+/** `DRIVER` -> `Driver`. Shared by the options and the "Wants …" badge. */
+function staffTypeLabel(type: StaffType | null | undefined) {
+  if (!type) return "any role";
+  return type.charAt(0) + type.slice(1).toLowerCase().replaceAll("_", " ");
+}
+
 const staffTypeOptions = Object.values(StaffType).map((type) => ({
-  label: type.charAt(0) + type.slice(1).toLowerCase().replaceAll("_", " "),
+  label: staffTypeLabel(type),
   value: type,
 }));
 
@@ -70,10 +86,32 @@ function roleOptionsFor(viewerRole: RoleKey) {
   return roleOptions.filter((option) => option.value !== RoleKey.SUPER_ADMIN);
 }
 
-export default async function AdminsPage() {
+export default async function AdminsPage({ searchParams }: { searchParams: Promise<{ q?: string }> }) {
+  const query = normalizeQuery((await searchParams).q);
   const viewer = await requireAdminPage();
   const isSuperAdmin = viewer.role === RoleKey.SUPER_ADMIN;
   const { users, requests } = await getAdminUsers();
+  // Rows stay in the DOM and non-matching ones are hidden, so the browser can
+  // reveal them again without a round trip.
+  const visibility = rowFilter(query);
+  // An account carries a first and last name; an access request carries a
+  // single full name. Both are searchable, so each gets its own text.
+  const userText = (user: (typeof users)[number]) =>
+    rowText(user.firstName, user.lastName, user.email, user.role.key, user.accountStatus);
+  const requestText = (request: (typeof requests)[number]) =>
+    rowText(
+      request.fullName,
+      request.email,
+      request.phone,
+      request.requestedRole,
+      // The requested staff role, in both forms, so searching "driver" finds the
+      // driver applications rather than only ones named "Driver".
+      request.staffType,
+      staffTypeLabel(request.staffType),
+      request.status,
+      request.note,
+      request.reviewNote,
+    );
   const assignableRoles = roleOptionsFor(viewer.role);
   const pendingRequests = requests.filter((request) => request.status === "PENDING");
   const awaitingApproval = users.filter((user) => user.accountStatus === AccountStatus.PENDING_APPROVAL);
@@ -81,6 +119,10 @@ export default async function AdminsPage() {
 
   return (
     <main className="space-y-6">
+      <AdminSearch
+        label="Search admins"
+        placeholder="Search accounts by name, email, role, or status…"
+      />
       <section className="rounded-[32px] border border-[var(--line)] bg-[var(--card)] p-6 shadow-sm sm:p-8">
         <p className="text-sm font-semibold uppercase tracking-[0.25em] text-[var(--brand-dark)]">Access control</p>
         <h1 className="mt-2 text-4xl font-semibold tracking-tight sm:text-5xl">The right people, the right access.</h1>
@@ -107,7 +149,7 @@ export default async function AdminsPage() {
           ) : (
             <div className="grid gap-3">
               {awaitingApproval.map((user) => (
-                <div key={user.id} className="flex flex-col gap-4 rounded-2xl border border-[color:color-mix(in_srgb,var(--warning-text)_28%,transparent)] bg-[var(--warning-soft)] p-4 sm:flex-row sm:items-center sm:justify-between">
+                <div key={user.id} data-row-id={user.id} data-row-text={userText(user)} style={visibility(userText(user))} className="flex flex-col gap-4 rounded-2xl border border-[color:color-mix(in_srgb,var(--warning-text)_28%,transparent)] bg-[var(--warning-soft)] p-4 sm:flex-row sm:items-center sm:justify-between">
                   <div className="min-w-0">
                     <div className="flex flex-wrap items-center gap-2">
                       <p className="font-semibold">{user.firstName} {user.lastName ?? ""}</p>
@@ -121,11 +163,11 @@ export default async function AdminsPage() {
                   <div className="flex flex-wrap items-center justify-end gap-2">
                     <ActionForm action={approveUserAccessFormAction}>
                       <input type="hidden" name="userId" value={user.id} />
-                      <Button type="submit" size="sm"><Check className="mr-2 h-4 w-4" />Approve</Button>
+                      <ActionSubmitButton size="sm"><Check className="mr-2 h-4 w-4" />Approve</ActionSubmitButton>
                     </ActionForm>
                     <ActionForm action={rejectUserAccessFormAction}>
                       <input type="hidden" name="userId" value={user.id} />
-                      <Button type="submit" size="sm" variant="outline"><X className="mr-2 h-4 w-4" />Reject</Button>
+                      <ActionSubmitButton size="sm" variant="outline"><X className="mr-2 h-4 w-4" />Reject</ActionSubmitButton>
                     </ActionForm>
                   </div>
                 </div>
@@ -185,13 +227,26 @@ export default async function AdminsPage() {
           ) : (
             <div className="grid gap-3">
               {pendingRequests.map((request) => (
-                <div key={request.id} className="flex flex-col gap-4 rounded-2xl border border-[color:color-mix(in_srgb,var(--warning-text)_28%,transparent)] bg-[var(--warning-soft)] p-4 sm:flex-row sm:items-center sm:justify-between">
+                <div key={request.id} data-row-id={request.id} data-row-text={requestText(request)} style={visibility(requestText(request))} className="flex flex-col gap-4 rounded-2xl border border-[color:color-mix(in_srgb,var(--warning-text)_28%,transparent)] bg-[var(--warning-soft)] p-4 sm:flex-row sm:items-center sm:justify-between">
                   <div className="min-w-0">
                     <div className="flex flex-wrap items-center gap-2">
                       <p className="font-semibold">{request.fullName}</p>
                       <Badge className={roleClass[request.requestedRole] ?? roleClass.CUSTOMER}>{request.requestedRole.toLowerCase()}</Badge>
+                      {/*
+                        What they actually asked for. Without this the only staff
+                        detail on the row was an empty select, so an applicant
+                        who asked to join as a driver looked identical to one who
+                        asked as a decorator, and the admin approved whatever the
+                        select happened to default to.
+                      */}
+                      {request.requestedRole === "STAFF" ? (
+                        <Badge className="bg-[var(--brand-soft)] text-[var(--brand-dark)]">
+                          Wants {staffTypeLabel(request.staffType)}
+                        </Badge>
+                      ) : null}
                     </div>
                     <p className="mt-1 break-words text-sm text-[var(--muted)]">{request.email}</p>
+                    {request.phone ? <p className="mt-1 break-words text-sm text-[var(--muted)]">{request.phone}</p> : null}
                     {request.note ? <p className="mt-2 text-sm">{request.note}</p> : null}
                     <p className="mt-2 text-xs text-[var(--muted)]">Requested {formatDate(request.createdAt)}</p>
                   </div>
@@ -200,16 +255,35 @@ export default async function AdminsPage() {
                       <Badge className="bg-[var(--info-soft)] text-[var(--info-text)]">Super admin only</Badge>
                     ) : (
                       <>
-                        <ActionForm action={reviewAdminRequestFormAction} className="flex items-center gap-2">
-                          <input type="hidden" name="requestId" value={request.id} />
-                          <input type="hidden" name="decision" value="APPROVED" />
-                          {request.requestedRole === "STAFF" ? <Select name="staffType" options={staffTypeOptions} className="h-9 w-40 text-xs" /> : null}
-                          <Button type="submit" size="sm"><Check className="mr-2 h-4 w-4" />Approve</Button>
-                        </ActionForm>
+                        {request.requestedRole === "STAFF" ? (
+                          <ActionForm action={reviewAdminRequestFormAction} className="flex items-center gap-2">
+                            <input type="hidden" name="requestId" value={request.id} />
+                            <input type="hidden" name="decision" value="APPROVED" />
+                            {/*
+                              Pre-set to what they asked for and still editable, so
+                              a reviewer can correct a mistaken application in one
+                              click instead of approving the wrong role by accident.
+                            */}
+                            <Select
+                              name="staffType"
+                              options={staffTypeOptions}
+                              defaultValue={request.staffType ?? StaffType.DECORATOR}
+                              className="h-9 w-40 text-xs"
+                              aria-label={`Staff role to grant ${request.fullName} as`}
+                            />
+                            <ActionSubmitButton size="sm"><Check className="mr-2 h-4 w-4" />Approve</ActionSubmitButton>
+                          </ActionForm>
+                        ) : (
+                          <ActionForm action={reviewAdminRequestFormAction} className="flex items-center gap-2">
+                            <input type="hidden" name="requestId" value={request.id} />
+                            <input type="hidden" name="decision" value="APPROVED" />
+                            <ActionSubmitButton size="sm"><Check className="mr-2 h-4 w-4" />Approve</ActionSubmitButton>
+                          </ActionForm>
+                        )}
                         <ActionForm action={reviewAdminRequestFormAction}>
                           <input type="hidden" name="requestId" value={request.id} />
                           <input type="hidden" name="decision" value="REJECTED" />
-                          <Button type="submit" size="sm" variant="outline"><X className="mr-2 h-4 w-4" />Decline</Button>
+                          <ActionSubmitButton size="sm" variant="outline"><X className="mr-2 h-4 w-4" />Decline</ActionSubmitButton>
                         </ActionForm>
                       </>
                     )}
@@ -232,7 +306,7 @@ export default async function AdminsPage() {
           ) : (
             <div className="grid gap-3">
               {blocked.map((user) => (
-                <div key={user.id} className="flex flex-col gap-4 rounded-2xl border border-[color:color-mix(in_srgb,var(--danger-text)_28%,transparent)] bg-[var(--danger-soft)] p-4 sm:flex-row sm:items-center sm:justify-between">
+                <div key={user.id} data-row-id={user.id} data-row-text={userText(user)} style={visibility(userText(user))} className="flex flex-col gap-4 rounded-2xl border border-[color:color-mix(in_srgb,var(--danger-text)_28%,transparent)] bg-[var(--danger-soft)] p-4 sm:flex-row sm:items-center sm:justify-between">
                   <div className="min-w-0">
                     <div className="flex flex-wrap items-center gap-2">
                       <p className="font-semibold">{user.firstName} {user.lastName ?? ""}</p>
@@ -357,7 +431,7 @@ export default async function AdminsPage() {
                       const canEditRole = isSuperAdmin && user.id !== viewer.id;
                       const isActive = user.accountStatus === AccountStatus.ACTIVE;
                       return (
-                        <TableRow key={user.id}>
+                        <TableRow key={user.id} data-row-id={user.id} data-row-text={userText(user)} style={visibility(userText(user))}>
                           <TableCell className="min-w-[14rem]">
                             <p className="font-semibold">{user.firstName} {user.lastName ?? ""}</p>
                             <p className="break-all text-sm text-[var(--muted)]">{user.email}</p>

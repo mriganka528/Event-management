@@ -66,9 +66,9 @@ export function ActivateForm({ token, email }: { token: string; email: string })
 
       <AuthFeedback state={state} />
 
-      <Button type="submit" disabled={pending}>
+      <Button type="submit" disabled={pending} aria-busy={pending || undefined}>
         {pending ? <Loader2 className="mr-2 h-4 w-4 animate-spin" aria-hidden="true" /> : <UserCheck className="mr-2 h-4 w-4" aria-hidden="true" />}
-        Set password and continue
+        {pending ? "Setting your password…" : "Set password and continue"}
       </Button>
     </form>
   );

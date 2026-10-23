@@ -2,10 +2,12 @@
 
 import { useCallback, useEffect, useRef, useState, useTransition } from "react";
 import Link from "next/link";
-import { useRouter } from "next/navigation";
-import { Bell, BellRing, CheckCheck, Radio, Settings2, WifiOff, X } from "lucide-react";
+import { usePathname, useRouter } from "next/navigation";
+import { Bell, CheckCheck, Radio, Settings2, Volume2, VolumeX, WifiOff, X } from "lucide-react";
 import { toast } from "react-hot-toast";
-import { markAllNotificationsFormAction } from "@/lib/form-actions";
+import { markAllNotificationsFormAction, markNotificationsSeenAction } from "@/lib/form-actions";
+import { isNotificationSoundEnabled, playNotificationSound, setNotificationSoundEnabled, unlockNotificationSound } from "@/lib/notification-sound";
+import { announceNotification } from "@/components/notifications/announce";
 import { cn } from "@/lib/utils";
 import type { NotificationView } from "@/lib/notification-links";
 
@@ -41,8 +43,24 @@ function relativeTime(iso: string) {
   return new Date(iso).toLocaleDateString("en-IN", { day: "numeric", month: "short" });
 }
 
+/**
+ * Whether a notification's link points at the page being viewed.
+ *
+ * The comparison is on the path, not the whole link: a notification that
+ * points at `/admin/bookings?status=PENDING` is about the bookings page, so
+ * opening `/admin/bookings` has dealt with it. A deeper page counts too, so
+ * `/admin/bookings/abc` satisfies a link to `/admin/bookings`.
+ */
+function isSameDestination(href: string, pathname: string) {
+  const target = href.split(/[?#]/)[0]?.replace(/\/+$/, "");
+  const current = pathname.replace(/\/+$/, "");
+  if (!target) return false;
+  return current === target || current.startsWith(`${target}/`);
+}
+
 export function AdminNotificationCenter({ initialItems, initialUnread }: { initialItems: NotificationView[]; initialUnread: number }) {
   const router = useRouter();
+  const pathname = usePathname();
   const [items, setItems] = useState(initialItems);
   const [unread, setUnread] = useState(initialUnread);
   const [open, setOpen] = useState(false);
@@ -50,13 +68,54 @@ export function AdminNotificationCenter({ initialItems, initialUnread }: { initi
   // about what is happening rather than claiming a connection that is not there yet.
   const [live, setLive] = useState<LiveState>({ status: "connecting" });
   const [permission, setPermission] = useState<NotificationPermission | "unsupported">("default");
+  const [soundOn, setSoundOn] = useState(true);
   const [, startTransition] = useTransition();
   const refreshTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // The ids already announced, so a notification is only ever announced once.
+  // The first render is not an arrival: the list is what the page loaded with,
+  // so announcing it would greet the reader with a chime for something that
+  // happened before they arrived.
+  const announced = useRef<Set<string> | null>(null);
+  if (announced.current === null) {
+    announced.current = new Set(initialItems.map((item) => item.id));
+  }
+  // Mirrors the connection state for the poller, which cannot read the state
+  // variable without re-creating its interval on every change.
+  const liveRef = useRef<LiveState["status"]>("connecting");
 
   useEffect(() => {
-    setItems(initialItems);
-    setUnread(initialUnread);
-  }, [initialItems, initialUnread]);
+    setSoundOn(isNotificationSoundEnabled());
+    // Browsers only allow sound after a gesture, so the audio context is
+    // unlocked on the first one rather than on the notification.
+    return unlockNotificationSound();
+  }, []);
+
+  /**
+   * A notification is "seen" once the reader has actually reached the thing it
+   * is about.
+   *
+   * Clicking it in the list is the obvious way, but the same thing happens
+   * when the page a notification points at is opened by any other route — the
+   * sidebar, a bookmark, a link inside a booking. Leaving the badge lit in
+   * that case meant the count only ever went down when the bell happened to
+   * be the thing that was clicked, which is not what "unread" should mean.
+   */
+  useEffect(() => {
+    if (!pathname) return;
+    const onThisPage = items.filter((item) => !item.read && item.href && isSameDestination(item.href, pathname));
+    if (onThisPage.length === 0) return;
+    // Mark them read locally straight away so the badge does not flicker, then
+    // persist it. The server is the authority; a failure here only means the
+    // badge comes back on the next load.
+    setItems((current) => current.map((item) => (onThisPage.some((seen) => seen.id === item.id) ? { ...item, read: true } : item)));
+    setUnread((count) => Math.max(0, count - onThisPage.length));
+    startTransition(async () => {
+      await markNotificationsSeenAction(onThisPage.map((item) => item.id));
+    });
+    // `items` is deliberately not a dependency: the effect is about the page
+    // changing, and re-running it for every items update would re-mark.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pathname]);
 
   useEffect(() => {
     if (typeof window === "undefined") return;
@@ -67,25 +126,54 @@ export function AdminNotificationCenter({ initialItems, initialUnread }: { initi
     setPermission(window.Notification.permission);
   }, []);
 
-  const showBrowserNotification = useCallback((item: NotificationView) => {
-    if (typeof window === "undefined" || !("Notification" in window)) return;
-    if (window.Notification.permission !== "granted") return;
-    if (localStorage.getItem(BROWSER_KEY) === "off") return;
-    try {
-      const notification = new window.Notification(item.title, {
-        body: item.message,
-        tag: item.id,
-        icon: "/icon.svg",
-      });
-      notification.onclick = () => {
-        window.focus();
-        router.push(item.href);
-        notification.close();
-      };
-    } catch {
-      // Some browsers block constructing notifications outside a user gesture.
-    }
-  }, [router]);
+  /**
+   * One arrival path for every channel.
+   *
+   * The socket is the fast path, but a serverless deployment has none and its
+   * polling fallback delivers the same notification as a changed prop. Both
+   * call this, so neither can lose the in-page popup, chime, or browser alert.
+   */
+  const announce = useCallback(
+    (item: NotificationView) => {
+      announceNotification(item, { navigate: (href) => router.push(href) });
+    },
+    [router],
+  );
+
+  /**
+   * Applies a list of notifications that came from the server.
+   *
+   * The same list arrives by two routes: as changed props when the page
+   * re-renders, and as the answer of the polling fallback on a deployment with
+   * no socket server. Both go through here, and anything that has not been
+   * announced yet is announced once, whichever route delivered it.
+   */
+  const applyServerList = useCallback(
+    (next: NotificationView[], unreadCount: number) => {
+      const known = announced.current ?? new Set<string>();
+      announced.current = known;
+      const fresh = next.filter((item) => !known.has(item.id));
+      for (const item of next) known.add(item.id);
+      setItems(next);
+      setUnread(unreadCount);
+      for (const item of fresh) announce(item);
+    },
+    [announce],
+  );
+
+  useEffect(() => {
+    /*
+     * Announce anything that arrived since the last render.
+     *
+     * The socket is the fast path, but a deployment without the custom server
+     * has none, and its polling fallback delivers the list instead. Either way
+     * the new notification arrives here as a changed prop, so the sound and
+     * the popup are raised from one place rather than two.
+     */
+    applyServerList(initialItems, initialUnread);
+    // `applyServerList` is stable, and `items` is deliberately not a
+    // dependency: this is about what the server has sent since last time.
+  }, [initialItems, initialUnread, applyServerList]);
 
   useEffect(() => {
     // Authentication rides on the HttpOnly session cookie, which the browser
@@ -99,38 +187,52 @@ export function AdminNotificationCenter({ initialItems, initialUnread }: { initi
     async function connect() {
       const { io } = await import("socket.io-client");
       if (disposed) return;
-      socket = io({ path: "/api/socket.io", withCredentials: true, transports: ["websocket", "polling"] });
-      socket.on("connect", () => setLive({ status: "live" }));
-      socket.on("disconnect", (reason: string) =>
+      socket = io({
+        path: "/api/socket.io",
+        withCredentials: true,
+        transports: ["websocket", "polling"],
+        // A deployment without the custom server has no socket to reach, and
+        // the default is to retry forever. The polling fallback below covers
+        // that case, so the attempts stop instead of repeating all session.
+        reconnectionAttempts: 3,
+        reconnectionDelay: 2000,
+        timeout: 8000,
+      });
+      socket.on("connect", () => {
+        liveRef.current = "live";
+        setLive({ status: "live" });
+      });
+      socket.on("disconnect", (reason: string) => {
+        liveRef.current = "offline";
         setLive({
           status: "offline",
           reason: reason === "io server disconnect" ? "The server closed the connection." : undefined,
-        }),
-      );
+        });
+      });
       socket.on("connect_error", (error: Error) => {
         // Surfaced in the tooltip. A refused handshake says why here, which is the
         // difference between a network problem and a session that has expired.
+        liveRef.current = "offline";
         setLive({ status: "offline", reason: error?.message });
       });
       socket.on("realtime:event", (event: { type?: string; notification?: NotificationView }) => {
         const incoming = event?.notification;
         if (incoming) {
-          setItems((current) => {
-            if (current.some((item) => item.id === incoming.id)) return current;
-            return [{ ...incoming }, ...current].slice(0, 30);
-          });
-          setUnread((count) => count + 1);
-          toast.custom(
-            <div className="flex items-start gap-2">
-              <BellRing className="mt-0.5 h-4 w-4 shrink-0 text-amber-600" />
-              <span className="flex flex-col">
-                <span className="font-semibold">{incoming.title}</span>
-                <span className="text-xs font-normal opacity-80">{incoming.message}</span>
-              </span>
-            </div>,
-            { icon: null, duration: 6000 },
-          );
-          showBrowserNotification(incoming);
+          /*
+           * Recorded as already announced before the refresh.
+           *
+           * The popup and chime are raised from this one place. The refresh
+           * below then delivers the same notification again as a changed prop,
+           * and without this the reader would hear the chime twice for one
+           * notification.
+           */
+          const isNew = !announced.current?.has(incoming.id);
+          announced.current?.add(incoming.id);
+          if (isNew) {
+            setItems((current) => [{ ...incoming }, ...current.filter((item) => item.id !== incoming.id)].slice(0, 30));
+            setUnread((count) => count + 1);
+            announce(incoming);
+          }
         }
         if (refreshSoon) return;
         refreshSoon = true;
@@ -143,14 +245,62 @@ export function AdminNotificationCenter({ initialItems, initialUnread }: { initi
     }
 
     void connect();
-    const fallback = window.setInterval(() => router.refresh(), 60_000);
+    /*
+     * The fallback for a deployment with no socket server, which is every
+     * serverless one. It re-reads the page, so the notification list and the
+     * unread count stay current, and the new items are announced the same way
+     * a socket event would announce them.
+     */
+    const fallback = window.setInterval(async () => {
+      router.refresh();
+    }, 30_000);
     return () => {
       disposed = true;
       if (refreshTimer.current) clearTimeout(refreshTimer.current);
       window.clearInterval(fallback);
       socket?.disconnect();
     };
-  }, [router, showBrowserNotification]);
+  }, [router, announce]);
+
+  useEffect(() => {
+    /*
+     * The notification poll.
+     *
+     * Socket.IO needs the custom server, so on Vercel there is none and the
+     * only way to hear about a payment is to ask. This asks a small endpoint
+     * for the newest notifications rather than re-rendering the page, so a
+     * payment alert reaches the admin in seconds instead of waiting for the
+     * next page refresh.
+     *
+     * It stays quiet while the socket is live: the push already delivered the
+     * same notification, and announcing it twice would be noise.
+     */
+    let cancelled = false;
+
+    async function poll() {
+      if (cancelled) return;
+      if (liveRef.current === "live") return;
+      try {
+        const response = await fetch("/api/admin/notifications", {
+          cache: "no-store",
+          headers: { Accept: "application/json" },
+        });
+        if (!response.ok) return;
+        const payload = (await response.json()) as { items?: NotificationView[]; unread?: number };
+        if (cancelled || !Array.isArray(payload.items)) return;
+        const unread = typeof payload.unread === "number" ? payload.unread : payload.items.filter((item) => !item.read).length;
+        applyServerList(payload.items, unread);
+      } catch {
+        // A failed poll is not worth an error popup; the next tick tries again.
+      }
+    }
+
+    const timer = window.setInterval(poll, 10_000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+  }, [applyServerList]);
 
   async function requestPermission() {
     if (typeof window === "undefined" || !("Notification" in window)) return;
@@ -162,6 +312,22 @@ export function AdminNotificationCenter({ initialItems, initialUnread }: { initi
     } else {
       toast.error("Browser notifications blocked. Enable them in your browser settings.");
     }
+  }
+
+  /**
+   * Closes one notification.
+   *
+   * The row is marked read rather than deleted: the team inbox is a record of
+   * what happened, and the badge counts what still needs looking at. Marking
+   * it read also survives the next poll, so a closed notification does not
+   * come back as unread.
+   */
+  function dismissItem(item: NotificationView) {
+    setItems((current) => current.map((entry) => (entry.id === item.id ? { ...entry, read: true } : entry)));
+    if (!item.read) setUnread((count) => Math.max(0, count - 1));
+    startTransition(async () => {
+      await markNotificationsSeenAction([item.id]);
+    });
   }
 
   function handleMarkAll() {
@@ -176,6 +342,24 @@ export function AdminNotificationCenter({ initialItems, initialUnread }: { initi
       toast.success(result?.success ?? "All notifications marked as read.");
       router.refresh();
     });
+  }
+
+  /**
+   * Turns the chime on or off, and says so.
+   *
+   * Turning it on plays it once, so the reader hears what they turned on
+   * without waiting for the next notification.
+   */
+  function handleToggleSound() {
+    const next = !soundOn;
+    setSoundOn(next);
+    setNotificationSoundEnabled(next);
+    if (next) {
+      playNotificationSound();
+      toast.success("Notification sound on.");
+    } else {
+      toast.success("Notification sound muted.");
+    }
   }
 
   return (
@@ -208,6 +392,22 @@ export function AdminNotificationCenter({ initialItems, initialUnread }: { initi
           <Settings2 className="h-3.5 w-3.5" /> Enable alerts
         </button>
       ) : null}
+
+      {/*
+        The sound is separate from the desktop notification: somebody may want
+        the chime without the operating system's pop-up, and vice versa. The
+        preference is remembered, so it is only asked once.
+      */}
+      <button
+        type="button"
+        onClick={handleToggleSound}
+        className="inline-flex h-10 w-10 items-center justify-center rounded-full border border-[var(--line)] bg-[var(--card)] text-[var(--muted)] transition hover:text-[var(--foreground)]"
+        title={soundOn ? "Mute notification sound" : "Play a sound for notifications"}
+        aria-label={soundOn ? "Mute notification sound" : "Play a sound for notifications"}
+        aria-pressed={soundOn}
+      >
+        {soundOn ? <Volume2 className="h-4 w-4" /> : <VolumeX className="h-4 w-4" />}
+      </button>
 
       <div className="relative">
         <button
@@ -246,7 +446,7 @@ export function AdminNotificationCenter({ initialItems, initialUnread }: { initi
               ) : (
                 <ul className="divide-y divide-[var(--line)]">
                   {items.map((item) => (
-                    <li key={item.id}>
+                    <li key={item.id} className="group relative">
                       <Link
                         href={item.href}
                         onClick={() => {
@@ -254,7 +454,7 @@ export function AdminNotificationCenter({ initialItems, initialUnread }: { initi
                           setUnread((count) => Math.max(0, count - (item.read ? 0 : 1)));
                           setOpen(false);
                         }}
-                        className={cn("block px-4 py-3 transition hover:bg-[var(--surface-muted)]", !item.read && "bg-amber-50/60")}
+                        className={cn("block px-4 py-3 pr-10 transition hover:bg-[var(--surface-muted)]", !item.read && "bg-amber-50/60")}
                       >
                         <div className="flex items-start gap-2">
                           <span className={cn("mt-1.5 h-2 w-2 shrink-0 rounded-full", item.read ? "bg-transparent" : "bg-amber-500")} />
@@ -265,6 +465,20 @@ export function AdminNotificationCenter({ initialItems, initialUnread }: { initi
                           </div>
                         </div>
                       </Link>
+                      {/*
+                        The per-item close. It clears the notification from the
+                        list and marks it read on the server, so a closed
+                        notification does not come back on the next render.
+                      */}
+                      <button
+                        type="button"
+                        onClick={() => dismissItem(item)}
+                        className="absolute right-2 top-2 rounded-full p-1.5 text-[var(--muted)] transition hover:bg-[var(--surface-muted)] hover:text-[var(--foreground)]"
+                        aria-label={`Dismiss notification: ${item.title}`}
+                        title="Dismiss notification"
+                      >
+                        <X className="h-3.5 w-3.5" />
+                      </button>
                     </li>
                   ))}
                 </ul>

@@ -2,6 +2,7 @@ import type { Metadata } from "next";
 import Link from "next/link";
 import { ArrowLeft, ShieldCheck, Users } from "lucide-react";
 import { JoinTeamForm } from "@/components/auth/join-team-form";
+import { requestStartedAt } from "@/lib/request-clock";
 import { ThemeToggle } from "@/components/marketing/theme-toggle";
 import { Button } from "@/components/ui/button";
 
@@ -38,7 +39,10 @@ export default function JoinTheTeamPage() {
           <li className="flex items-start gap-2"><ShieldCheck className="mt-0.5 h-4 w-4 shrink-0 text-[var(--success-text)]" />Every request is recorded in the audit log.</li>
         </ul>
 
-        <JoinTeamForm />
+        {/* Stamped here, in the server render, and handed down. The form is a
+            client component, so reading the clock inside it would produce a
+            different number on hydration than the one in this markup. */}
+        <JoinTeamForm renderedAt={requestStartedAt()} />
 
         <div className="flex flex-wrap items-center gap-3">
           <Link href="/sign-in">

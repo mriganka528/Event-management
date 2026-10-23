@@ -1,8 +1,8 @@
 "use client";
 
 import Link from "next/link";
-import { LogIn } from "lucide-react";
-import { signOutAction } from "@/lib/auth-actions";
+import { LayoutDashboard, LogIn } from "lucide-react";
+import { SignOutForm } from "@/components/auth/sign-out-form";
 import { Button } from "@/components/ui/button";
 
 export type AccountState = {
@@ -26,31 +26,34 @@ export type AccountState = {
  */
 export function AccountAccess({ name: signedInName, roleLabel, workspaceHref }: AccountState) {
   if (signedInName && roleLabel && workspaceHref) {
+    // The customer workspace used to be an almost invisible white chip with a
+    // single initial in it; people who had just signed in could not find their
+    // dashboard. The destination is now a solid brand button with a dashboard
+    // glyph, labelled in words ("My dashboard" / "Admin panel") on every width
+    // where there is room, and still icon-led on phones.
+    const isCustomer = roleLabel.toLowerCase().includes("customer");
+    const destination = isCustomer ? "My dashboard" : roleLabel.toLowerCase().includes("staff") ? "Staff workspace" : "Admin panel";
     return (
       <div className="flex min-w-0 items-center gap-2">
         <Link
           href={workspaceHref}
-          className="flex min-w-0 items-center gap-2 rounded-full border border-[var(--line)] bg-[var(--card)] py-1.5 pl-1.5 pr-3 transition hover:bg-[var(--surface-muted)]"
+          className="group flex min-w-0 items-center gap-2.5 rounded-full border border-[var(--brand)] bg-[var(--brand-soft)] py-1.5 pl-1.5 pr-3 transition hover:bg-[var(--brand)] hover:text-stone-950"
         >
-          <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-[var(--brand-soft)] text-xs font-semibold text-[var(--brand-dark)]" aria-hidden>
-            {(signedInName.trim()[0] ?? "?").toUpperCase()}
+          <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-[var(--brand)] text-stone-950" aria-hidden>
+            <LayoutDashboard className="h-4 w-4" />
           </span>
           <span className="hidden min-w-0 leading-tight sm:block">
-            {/* Explicitly labelled as customer / staff rather than just the
-                role, because that distinction is what the visitor is here to
-                confirm. */}
-            <span className="block truncate text-xs font-semibold capitalize text-[var(--foreground)]">{roleLabel}</span>
-            <span className="block max-w-[10rem] truncate text-[11px] text-[var(--muted)]">{signedInName}</span>
+            <span className="block truncate text-xs font-bold">{destination}</span>
+            <span className="block max-w-[10rem] truncate text-[11px] text-[var(--muted)] group-hover:text-stone-800">{signedInName}</span>
           </span>
-          <span className="sr-only">Signed in as {roleLabel}: {signedInName}. Open your workspace.</span>
+          <span className="sr-only">Signed in as {roleLabel}: {signedInName}. Open {destination}.</span>
         </Link>
-        <form action={signOutAction}>
-          <Button type="submit" variant="outline" size="sm" className="px-3" title="Sign out">
-            <LogIn className="h-4 w-4 rotate-180" />
-            <span className="hidden sm:inline">Sign out</span>
-            <span className="sr-only sm:hidden">Sign out</span>
-          </Button>
-        </form>
+        <SignOutForm
+          variant="ghost"
+          size="sm"
+          className="px-2.5"
+          iconOnlyOnMobile
+        />
       </div>
     );
   }

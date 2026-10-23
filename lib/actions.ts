@@ -1,13 +1,13 @@
 "use server";
 
 import { createHash } from "node:crypto";
-import { AccountStatus, BookingStatus, NotificationType, PaymentMethod, PaymentStage, PricingMode, RoleKey, StaffStatus, StaffType } from "@prisma/client";
+import { AccountStatus, BookingStatus, NotificationType, PaymentMethod, PaymentRequestMode, PaymentStage, PricingMode, RoleKey, StaffStatus, StaffType } from "@prisma/client";
 import { ZodError } from "zod";
 import { headers } from "next/headers";
-import { revalidatePath } from "next/cache";
+import { revalidatePath, updateTag } from "next/cache";
 import { prisma } from "@/lib/prisma";
 import { toFriendlyError } from "@/lib/errors";
-import { notifyAdmins, notifyUser } from "@/lib/notifications";
+import { notifyAdmins, notifyAdminsSafely, notifyUser } from "@/lib/notifications";
 import { getCurrentUser, isAdminRole, requireAdmin, requireCustomer, requireStaff, requestIp, requireSuperAdmin } from "@/lib/rbac";
 import { approveAccessRequest, inviteTeamMember, rejectAccessRequest, resendTeamInvite, submitAccessRequest } from "@/lib/auth/team";
 import {
@@ -15,13 +15,15 @@ import {
   changeUserRole,
   rejectAccountAccess,
   removeAdminAccess,
+  removeCustomerAccess,
   setAccountActive,
 } from "@/lib/access-management";
 import { recordSecurityEvent } from "@/lib/security-audit";
+import { revokeAllSessions } from "@/lib/auth/session";
 import {
   sendAccessApprovedEmail,
   sendAccessDeclinedEmail,
-  sendStaffActivatedEmail,
+  sendPaymentRequestEmail,
 } from "@/lib/mailer";
 import {
   createBookingForPublicCustomer,
@@ -31,8 +33,15 @@ import {
   updateBookingStatus,
 } from "@/lib/bookings";
 import { emitAdminEvent } from "@/lib/realtime";
+import { customerFacingBookingMessage, isAccountRequiredBookingError } from "@/lib/public-booking-error";
+import { paymentRequestTarget, roundCurrency, PAYMENT_REQUEST_LABEL } from "@/lib/payment-requests";
+import { approveCashPayment, declareCashPayment, rejectCashPayment } from "@/lib/cash-payments";
 import { assertCloudinaryAssetPair, deleteCloudinaryImage } from "@/lib/cloudinary";
+import { formatInventoryCategory } from "@/lib/inventory";
 import { withSerializableRetry } from "@/lib/transactions";
+import { absoluteUrl } from "@/lib/site";
+import { eventRangesOverlap, isAssignmentLive } from "@/lib/staff-assignment";
+import { BUSINESS_SETTINGS_TAG } from "@/lib/settings";
 import { slugify } from "@/lib/utils";
 import { allowRequest, getClientIp } from "@/lib/rate-limit";
 import {
@@ -50,15 +59,35 @@ import {
 
 function publicBookingError(error: unknown) {
   if (error instanceof ZodError) return toFriendlyError(error);
-  if (error instanceof Error && ["Event date must", "One or more selected services", "The selected package", "Choose a package", "Please enter", "valid date", "guest", "location", "incoming"].some((fragment) => error.message.toLowerCase().includes(fragment.toLowerCase()))) return error.message;
+  // Messages written for the customer are forwarded verbatim; everything else
+  // is replaced so an internal failure never leaks a stack-shaped string. The
+  // list of which is which lives in one place — see `lib/public-booking-error.ts`
+  // for what happens when the two copies of it drift apart.
+  const customerMessage = customerFacingBookingMessage(error);
+  if (customerMessage) return customerMessage;
+  /*
+   * The customer gets the friendly sentence, but the cause is written here —
+   * otherwise an internal failure is indistinguishable from "the booking form is
+   * broken", which is exactly what it looks like from the outside.
+   */
+  console.error("[booking] request failed", error);
   return "We could not create the booking right now. Please try again.";
 }
+
+
 
 export type ActionState = {
   success: string | null;
   error: string | null;
   bookingId?: string;
   publicToken?: string;
+  /**
+   * A machine-readable reason, for a form that has to *act* on the failure rather
+   * than print it. `ACCOUNT_REQUIRED` is the one that matters: the request needs
+   * an account before a booking can exist, so the form offers both ways forward —
+   * see `isAccountRequiredBookingError`.
+   */
+  code?: "ACCOUNT_REQUIRED";
 };
 
 function getString(formData: FormData, key: string) {
@@ -71,9 +100,37 @@ function getOptionalString(formData: FormData, key: string) {
   return value || undefined;
 }
 
+/**
+ * Every value submitted under one key, in order and without duplicates.
+ *
+ * A multi-select posts one entry per chosen value under the same name, so this is
+ * the read side of it. Blanks are dropped rather than rejected: a form that
+ * renders one hidden field per selected option leaves an empty one behind the
+ * moment the last option is un-ticked.
+ */
+function getStringList(formData: FormData, key: string) {
+  return Array.from(new Set(formData.getAll(key).filter((value): value is string => typeof value === "string").map((value) => value.trim()).filter(Boolean)));
+}
+
 function getNumber(formData: FormData, key: string) {
   const raw = getString(formData, key).trim();
   if (!raw) throw new Error(`${key} is required.`);
+  const value = Number(raw);
+  if (!Number.isFinite(value)) throw new Error(`${key} must be a valid number.`);
+  return value;
+}
+
+/**
+ * A number the form may legitimately have left out.
+ *
+ * Used for a field that is only rendered when it can change something — the day
+ * count appears only when something in the quote is priced per day. Absent means
+ * one day, and the schema still bounds whatever arrives, so a hand-edited value is
+ * refused rather than believed.
+ */
+function getOptionalNumber(formData: FormData, key: string, fallback: number) {
+  const raw = getString(formData, key).trim();
+  if (!raw) return fallback;
   const value = Number(raw);
   if (!Number.isFinite(value)) throw new Error(`${key} must be a valid number.`);
   return value;
@@ -102,6 +159,41 @@ function formDataObject(formData: FormData, keys: string[]) {
   );
 }
 
+type StockSnapshot = { name: string; category: string; availableQuantity: number; reorderLevel: number };
+
+/**
+ * Raises a live alert when an inventory write leaves stock at or below its
+ * reorder level.
+ *
+ * The reservation path already warned when a booking consumed the last units,
+ * but a manual edit could silently do the same thing — lowering `totalQuantity`
+ * or archiving a stocked item. Every admin now sees the shortfall immediately
+ * instead of finding it when the next booking fails to reserve.
+ */
+async function alertLowStock(items: readonly StockSnapshot[]) {
+  const exhausted = items.filter((item) => item.availableQuantity <= 0);
+  const low = items.filter((item) => item.availableQuantity > 0 && item.availableQuantity <= item.reorderLevel);
+  if (exhausted.length === 0 && low.length === 0) return;
+
+  const describe = (item: StockSnapshot) => `${item.name} (${formatInventoryCategory(item.category).toLowerCase()})`;
+  if (exhausted.length > 0) {
+    await notifyAdmins({
+      type: NotificationType.LOW_INVENTORY,
+      title: exhausted.length === 1 ? "Out of stock" : `${exhausted.length} items out of stock`,
+      message: `${exhausted.map(describe).join(", ")} ${exhausted.length === 1 ? "has" : "have"} no units available. Services that need this stock cannot be booked until it is restocked.`,
+      href: "/admin/inventory",
+    });
+  }
+  if (low.length > 0) {
+    await notifyAdmins({
+      type: NotificationType.LOW_INVENTORY,
+      title: exhausted.length === 0 && low.length === 1 ? "Low inventory alert" : `${low.length} items low on stock`,
+      message: `${low.map((item) => `${describe(item)}: ${item.availableQuantity} left, reorder at ${item.reorderLevel}`).join(" · ")}.`,
+      href: "/admin/inventory",
+    });
+  }
+}
+
 async function enforceActionRateLimit(scope: string, key: string, limit = 30, windowMs = 10 * 60_000) {
   const requestHeaders = await headers();
   const ip = getClientIp({ headers: requestHeaders });
@@ -121,10 +213,18 @@ export async function createBookingAction(
       customerName: getString(formData, "customerName"),
       customerEmail: getString(formData, "customerEmail"),
       customerPhone: getString(formData, "customerPhone"),
+      customerAddress: getString(formData, "customerAddress"),
       eventType: getString(formData, "eventType"),
       eventDate: getString(formData, "eventDate"),
+      // The end of the range, when the customer gave one. The day count is
+      // derived from the range on the server, so the two cannot disagree.
+      eventEndDate: getString(formData, "eventEndDate"),
       location: getString(formData, "location"),
       guestCount: getNumber(formData, "guestCount"),
+      // Only sent when the quote contains a per-day service, so an absent field
+      // means a single-day event. Reading it here is what makes a three-day
+      // function bill three days and hold three days of stock, rather than one.
+      durationDays: getOptionalNumber(formData, "durationDays", 1),
       packageId: getOptionalString(formData, "packageId"),
       notes: getString(formData, "notes"),
       idempotencyKey: getOptionalString(formData, "idempotencyKey"),
@@ -141,7 +241,11 @@ export async function createBookingAction(
       publicToken: booking.publicToken ?? undefined,
     };
   } catch (error) {
-    return { success: null, error: publicBookingError(error) };
+    return {
+      success: null,
+      error: publicBookingError(error),
+      code: isAccountRequiredBookingError(error) ? "ACCOUNT_REQUIRED" : undefined,
+    };
   }
 }
 
@@ -187,6 +291,155 @@ export async function recordPaymentAction(formData: FormData): Promise<ActionSta
   }
 }
 
+export async function declareCashPaymentAction(formData: FormData): Promise<ActionState> {
+  try {
+    const current = await requireCustomer();
+    if (!current.customerProfile) throw new Error("Complete your customer profile before declaring a cash payment.");
+    await enforceActionRateLimit("cash-payment", current.id, 10, 60_000);
+    const bookingId = getString(formData, "bookingId");
+    const amount = getNumber(formData, "amount");
+    await declareCashPayment({ bookingId, customerId: current.customerProfile.id, amount });
+    revalidatePath("/customer/dashboard");
+    revalidatePath(`/customer/bookings/${bookingId}`);
+    revalidatePath(`/admin/bookings/${bookingId}`);
+    revalidatePath("/admin/payments");
+    return { success: "Cash payment submitted. Our team will confirm it before your balance changes.", error: null, bookingId };
+  } catch (error) {
+    return { success: null, error: messageFromError(error) };
+  }
+}
+
+export async function approveCashPaymentAction(formData: FormData): Promise<ActionState> {
+  try {
+    await requireAdmin();
+    const paymentId = getString(formData, "paymentId");
+    await enforceActionRateLimit("cash-approval", paymentId, 20, 60_000);
+    const result = await approveCashPayment(paymentId);
+    revalidatePath("/admin/bookings");
+    revalidatePath(`/admin/bookings/${result.bookingId}`);
+    revalidatePath("/admin/payments");
+    revalidatePath("/admin/invoices");
+    revalidatePath("/customer/dashboard");
+    revalidatePath(`/customer/bookings/${result.bookingId}`);
+    return { success: "Cash payment approved and added to the booking balance.", error: null, bookingId: result.bookingId };
+  } catch (error) {
+    return { success: null, error: messageFromError(error) };
+  }
+}
+
+export async function rejectCashPaymentAction(formData: FormData): Promise<ActionState> {
+  try {
+    await requireAdmin();
+    const paymentId = getString(formData, "paymentId");
+    await enforceActionRateLimit("cash-rejection", paymentId, 20, 60_000);
+    const result = await rejectCashPayment(paymentId);
+    revalidatePath("/admin/bookings");
+    revalidatePath(`/admin/bookings/${result.bookingId}`);
+    revalidatePath("/admin/payments");
+    revalidatePath("/customer/dashboard");
+    revalidatePath(`/customer/bookings/${result.bookingId}`);
+    return { success: "Cash payment rejected. No balance was changed.", error: null, bookingId: result.bookingId };
+  } catch (error) {
+    return { success: null, error: messageFromError(error) };
+  }
+}
+
+export async function requestPaymentAction(formData: FormData): Promise<ActionState> {
+  try {
+    await requireAdmin();
+    const bookingId = getString(formData, "bookingId");
+    await enforceActionRateLimit("payment-request", bookingId, 20, 60_000);
+    const mode = getString(formData, "mode") as PaymentRequestMode;
+    if (!Object.values(PaymentRequestMode).includes(mode)) throw new Error("Choose an advance, half, or the full balance.");
+    const booking = await prisma.booking.findUnique({
+      where: { id: bookingId },
+      select: { id: true, status: true, totalAmount: true, paidAmount: true, balanceAmount: true, customer: { select: { userId: true, user: { select: { email: true, firstName: true, lastName: true } } } } },
+    });
+    if (!booking) throw new Error("Booking not found.");
+    const payableStatuses: BookingStatus[] = [BookingStatus.APPROVED, BookingStatus.PREPARING, BookingStatus.COMPLETED];
+    if (!payableStatuses.includes(booking.status)) throw new Error("Payment can only be requested after the booking is approved.");
+    if (Number(booking.balanceAmount) <= 0) throw new Error("This booking is already fully paid.");
+    const paid = Number(booking.paidAmount);
+    const balance = Number(booking.balanceAmount);
+    // HALF means half of what is still owed, so the cumulative target includes
+    // the amount already paid. Using only the total here is what made a 50%
+    // request on a 75%-outstanding booking ask for 25% of the total.
+    const target = paymentRequestTarget(mode, Number(booking.totalAmount), { paidAmount: paid, balanceAmount: balance });
+    if (target - paid < 0.01) throw new Error("The customer has already paid that amount. Choose a larger request.");
+    await prisma.booking.update({
+      where: { id: bookingId },
+      data: { paymentRequestMode: mode, paymentRequestTargetAmount: target, paymentRequestedAt: new Date() },
+    });
+    const due = roundCurrency(Math.min(balance, target - paid));
+    await notifyUser(booking.customer.userId, {
+      type: NotificationType.PAYMENT_REQUESTED,
+      title: "Payment requested",
+      message: `Our team has requested a payment of ₹${due.toLocaleString("en-IN")} for your booking. You can pay it from your dashboard.`,
+      href: `/customer/bookings/${bookingId}`,
+    });
+    await notifyAdminsSafely({
+      type: NotificationType.PAYMENT_REQUESTED,
+      title: "Payment request sent",
+      message: `${[booking.customer.user.firstName, booking.customer.user.lastName].filter(Boolean).join(" ") || "A customer"} was asked to pay ₹${due.toLocaleString("en-IN")} for booking ${bookingId.slice(0, 8).toUpperCase()} (${PAYMENT_REQUEST_LABEL[mode]}).`,
+      href: `/admin/bookings/${bookingId}`,
+    });
+    const mail = await sendPaymentRequestEmail({
+      to: booking.customer.user.email,
+      firstName: booking.customer.user.firstName,
+      reference: booking.id.slice(0, 8).toUpperCase(),
+      amount: due,
+      modeLabel: PAYMENT_REQUEST_LABEL[mode],
+      balanceAmount: Number(booking.balanceAmount),
+      bookingUrl: absoluteUrl(`/customer/bookings/${bookingId}`),
+    });
+    emitAdminEvent("booking.updated", { entityId: bookingId, action: "payment-requested" });
+    revalidatePath("/admin/bookings");
+    revalidatePath(`/admin/bookings/${bookingId}`);
+    revalidatePath("/customer/dashboard");
+    revalidatePath(`/customer/bookings/${bookingId}`);
+    return {
+      success: mail.sent
+        ? `Payment request sent for ₹${due.toLocaleString("en-IN")}.`
+        : `Payment request saved for ₹${due.toLocaleString("en-IN")}, but the email could not be sent. The customer can still see it on their dashboard.`,
+      error: null,
+      bookingId,
+    };
+  } catch (error) {
+    return { success: null, error: messageFromError(error) };
+  }
+}
+
+export async function clearPaymentRequestAction(formData: FormData): Promise<ActionState> {
+  try {
+    await requireAdmin();
+    const bookingId = getString(formData, "bookingId");
+    await enforceActionRateLimit("payment-request-clear", bookingId, 20, 60_000);
+    const booking = await prisma.booking.findUnique({ where: { id: bookingId }, select: { customer: { select: { userId: true } } } });
+    if (!booking) throw new Error("Booking not found.");
+    await prisma.booking.updateMany({
+      where: { id: bookingId },
+      data: { paymentRequestMode: null, paymentRequestTargetAmount: null, paymentRequestedAt: null },
+    });
+    await notifyUser(booking.customer.userId, {
+      type: NotificationType.PAYMENT_REQUESTED,
+      title: "Payment request withdrawn",
+      message: "Our team has withdrawn the latest payment request for your booking.",
+      href: `/customer/bookings/${bookingId}`,
+    });
+    await notifyAdminsSafely({
+      type: NotificationType.PAYMENT_REQUESTED,
+      title: "Payment request withdrawn",
+      message: `The latest payment request for booking ${bookingId.slice(0, 8).toUpperCase()} was withdrawn.`,
+      href: `/admin/bookings/${bookingId}`,
+    });
+    revalidatePath(`/admin/bookings/${bookingId}`);
+    revalidatePath(`/customer/bookings/${bookingId}`);
+    return { success: "Payment request withdrawn.", error: null, bookingId };
+  } catch (error) {
+    return { success: null, error: messageFromError(error) };
+  }
+}
+
 export async function createInvoiceAction(formData: FormData): Promise<ActionState> {
   try {
     await requireAdmin();
@@ -203,7 +456,6 @@ export async function createInvoiceAction(formData: FormData): Promise<ActionSta
     return { success: null, error: messageFromError(error) };
   }
 }
-
 export async function deleteEventAction(formData: FormData): Promise<ActionState> {
   try {
     await requireAdmin();
@@ -266,6 +518,7 @@ export async function createInventoryAction(formData: FormData): Promise<ActionS
     });
     revalidatePath("/admin/inventory");
     emitAdminEvent("inventory.updated", { entityId: item.id, action: "created" });
+    await alertLowStock([item]);
     return { success: `${item.name} added to inventory.`, error: null };
   } catch (error) {
     return { success: null, error: messageFromError(error) };
@@ -311,14 +564,15 @@ export async function updateInventoryAction(formData: FormData): Promise<ActionS
           imageUrl: data.imageUrl || null,
           imagePublicId: data.imagePublicId || null,
         },
-        select: { id: true, imagePublicId: true },
+        select: { id: true, imagePublicId: true, name: true, category: true, availableQuantity: true, reorderLevel: true },
       });
-      return { id: updated.id, oldPublicId: existing.imagePublicId };
+      return { ...updated, oldPublicId: existing.imagePublicId };
     });
     if (current.oldPublicId && current.oldPublicId !== data.imagePublicId) await deleteCloudinaryImage(current.oldPublicId);
     revalidatePath("/admin/inventory");
     revalidatePath(`/admin/bookings/${current.id}`);
     emitAdminEvent("inventory.updated", { entityId: current.id, action: "updated" });
+    await alertLowStock([current]);
     return { success: "Inventory item updated.", error: null };
   } catch (error) {
     return { success: null, error: messageFromError(error) };
@@ -415,6 +669,29 @@ export async function updatePackageAction(formData: FormData): Promise<ActionSta
   }
 }
 
+/**
+ * Warns admins when a service is pointed at a stock category that has nothing
+ * active behind it. The booking form will refuse every request for that
+ * service, so the catalog owner has to know immediately rather than by reading
+ * failed quotes later.
+ */
+async function alertUnconfiguredInventory(categories: readonly string[], serviceName: string) {
+  if (categories.length === 0) return;
+  const configured = await prisma.inventory.findMany({
+    where: { category: { in: [...categories] as never[] }, isActive: true },
+    select: { category: true },
+    distinct: ["category"],
+  });
+  const missing = categories.filter((category) => !configured.some((row) => row.category === category));
+  if (missing.length === 0) return;
+  await notifyAdmins({
+    type: NotificationType.LOW_INVENTORY,
+    title: "No inventory configured",
+    message: `"${serviceName}" is linked to ${missing.map((category) => formatInventoryCategory(category).toLowerCase()).join(", ")} but no active inventory item uses ${missing.length === 1 ? "that category" : "those categories"}, so bookings that need ${missing.length === 1 ? "it" : "them"} will be refused. Add stock or unlink ${missing.length === 1 ? "it" : "them"}.`,
+    href: "/admin/inventory",
+  });
+}
+
 export async function createServiceAction(formData: FormData): Promise<ActionState> {
   try {
     await requireAdmin();
@@ -425,7 +702,7 @@ export async function createServiceAction(formData: FormData): Promise<ActionSta
       basePrice: getNumber(formData, "basePrice"),
       unitLabel: getString(formData, "unitLabel") || "unit",
       pricingMode: getString(formData, "pricingMode") || PricingMode.FIXED,
-      inventoryCategory: getOptionalString(formData, "inventoryCategory") || null,
+      inventoryCategories: getStringList(formData, "inventoryCategories"),
       imageUrl: getString(formData, "imageUrl"),
       imagePublicId: getString(formData, "imagePublicId"),
     });
@@ -438,7 +715,7 @@ export async function createServiceAction(formData: FormData): Promise<ActionSta
         basePrice: data.basePrice,
         unitLabel: data.unitLabel,
         pricingMode: data.pricingMode,
-        inventoryCategory: data.inventoryCategory ?? null,
+        inventoryCategories: data.inventoryCategories,
         imageUrl: data.imageUrl || null,
         imagePublicId: data.imagePublicId || null,
       },
@@ -451,6 +728,7 @@ export async function createServiceAction(formData: FormData): Promise<ActionSta
     revalidatePath("/services");
     revalidatePath("/services/[slug]", "page");
     emitAdminEvent("catalog.updated", { entityId: service.id, action: "service-created" });
+    await alertUnconfiguredInventory(data.inventoryCategories, service.name);
     return { success: `${service.name} added to the service catalog.`, error: null };
   } catch (error) {
     return { success: null, error: messageFromError(error) };
@@ -468,7 +746,7 @@ export async function updateServiceAction(formData: FormData): Promise<ActionSta
       basePrice: getNumber(formData, "basePrice"),
       unitLabel: getString(formData, "unitLabel") || "unit",
       pricingMode: getString(formData, "pricingMode") || PricingMode.FIXED,
-      inventoryCategory: getOptionalString(formData, "inventoryCategory") || null,
+      inventoryCategories: getStringList(formData, "inventoryCategories"),
       imageUrl: getString(formData, "imageUrl"),
       imagePublicId: getString(formData, "imagePublicId"),
     });
@@ -483,7 +761,7 @@ export async function updateServiceAction(formData: FormData): Promise<ActionSta
         basePrice: data.basePrice,
         unitLabel: data.unitLabel,
         pricingMode: data.pricingMode,
-        inventoryCategory: data.inventoryCategory ?? null,
+        inventoryCategories: data.inventoryCategories,
         imageUrl: data.imageUrl || null,
         imagePublicId: data.imagePublicId || null,
       },
@@ -497,6 +775,7 @@ export async function updateServiceAction(formData: FormData): Promise<ActionSta
     revalidatePath("/services");
     revalidatePath("/services/[slug]", "page");
     emitAdminEvent("catalog.updated", { entityId: service.id, action: "service-updated" });
+    await alertUnconfiguredInventory(data.inventoryCategories, service.name);
     return { success: `${service.name} updated.`, error: null };
   } catch (error) {
     return { success: null, error: messageFromError(error) };
@@ -610,6 +889,9 @@ export async function setInventoryActiveAction(formData: FormData): Promise<Acti
     const item = await prisma.inventory.update({ where: { id }, data: { isActive } });
     revalidatePath("/admin/inventory");
     emitAdminEvent("inventory.updated", { entityId: item.id, action: isActive ? "restored" : "archived" });
+    // Archiving hides stock from new reservations, so an archived-but-full item
+    // is as good as an outage and must be announced the same way.
+    await alertLowStock(await prisma.inventory.findMany({ where: { isActive: true }, select: { name: true, category: true, availableQuantity: true, reorderLevel: true } }));
     return { success: `${item.name} ${isActive ? "restored" : "archived"}.`, error: null };
   } catch (error) {
     return { success: null, error: messageFromError(error) };
@@ -622,7 +904,7 @@ export async function deleteInventoryAction(formData: FormData): Promise<ActionS
     const id = getString(formData, "id");
     await enforceActionRateLimit("inventory-delete", id, 10, 60_000);
     const result = await withSerializableRetry(async (tx) => {
-      const item = await tx.inventory.findUnique({ where: { id }, select: { id: true, name: true, bookedQuantity: true, imagePublicId: true, _count: { select: { bookingInventory: true } } } });
+      const item = await tx.inventory.findUnique({ where: { id }, select: { id: true, name: true, category: true, bookedQuantity: true, imagePublicId: true, _count: { select: { bookingInventory: true } } } });
       if (!item) throw new Error("Inventory item not found.");
       if (item._count.bookingInventory > 0 || item.bookedQuantity > 0) {
         throw new Error("This inventory item is reserved by a booking. Archive it instead of deleting it.");
@@ -633,6 +915,7 @@ export async function deleteInventoryAction(formData: FormData): Promise<ActionS
     await deleteCloudinaryImage(result.imagePublicId);
     revalidatePath("/admin/inventory");
     emitAdminEvent("inventory.updated", { entityId: id, action: "deleted" });
+    await alertLowStock(await prisma.inventory.findMany({ where: { isActive: true, category: result.category }, select: { name: true, category: true, availableQuantity: true, reorderLevel: true } }));
     return { success: `${result.name} deleted.`, error: null };
   } catch (error) {
     return { success: null, error: messageFromError(error) };
@@ -697,56 +980,6 @@ export async function resendStaffInviteAction(formData: FormData): Promise<Actio
   }
 }
 
-export async function acceptStaffInviteAction(formData: FormData): Promise<ActionState> {
-  try {
-    const token = getString(formData, "token").trim();
-    if (!token) throw new Error("This invitation link is invalid.");
-    const staff = await prisma.staff.findUnique({ where: { inviteToken: token }, include: { user: true } });
-    if (!staff) throw new Error("This invitation link is invalid or has already been used.");
-    if (staff.status === StaffStatus.ACTIVE) return { success: "Your staff account is already active.", error: null };
-    if (staff.inviteExpiresAt && staff.inviteExpiresAt.getTime() < Date.now()) {
-      throw new Error("This invitation has expired. Ask an administrator to resend it.");
-    }
-    const current = await getCurrentUser();
-    if (!current) throw new Error("Please sign in or create your account to activate this invitation.");
-    // Matched on the signed-in identity, never on the email field, so opening
-    // somebody else's invite link cannot activate this account.
-    if (current.id !== staff.userId) {
-      throw new Error(`This invitation was sent to ${staff.user.email}. Sign in with that email address.`);
-    }
-    if (current.accountStatus === AccountStatus.SUSPENDED) {
-      throw new Error("This account is suspended. Contact an administrator.");
-    }
-    // Opening the emailed link is the final approval step for an invited
-    // staff member, so the account leaves PENDING_APPROVAL here.
-    await withSerializableRetry(async (tx) => {
-      const claimed = await tx.staff.updateMany({
-        where: { id: staff.id, status: StaffStatus.PENDING },
-        data: { status: StaffStatus.ACTIVE, activatedAt: new Date(), inviteToken: null, inviteExpiresAt: null },
-      });
-      if (claimed.count !== 1) throw new Error("This invitation has already been used.");
-      await tx.user.update({
-        where: { id: staff.userId },
-        data: { isActive: true, accountStatus: AccountStatus.ACTIVE, approvedAt: new Date(), suspendedAt: null, suspensionReason: null },
-      });
-    });
-    await recordSecurityEvent({ type: "ACCOUNT_APPROVED", userId: staff.userId, email: staff.user.email, detail: "Staff invitation accepted; account activated." });
-    await sendStaffActivatedEmail({ to: staff.user.email, firstName: staff.user.firstName, staffType: staff.staffType });
-    await notifyAdmins({
-      type: NotificationType.STAFF_ACTIVATED,
-      title: "Staff member activated",
-      message: `${staff.user.firstName} ${staff.user.lastName ?? ""}`.trim() + ` activated their ${staff.staffType.toLowerCase().replaceAll("_", " ")} account.`,
-      href: "/admin/staff",
-    });
-    revalidatePath("/admin/staff");
-    revalidatePath("/staff");
-    revalidatePath("/admin/security");
-    return { success: "Your staff account is active. Welcome to the team!", error: null };
-  } catch (error) {
-    return { success: null, error: messageFromError(error) };
-  }
-}
-
 export async function updateStaffAction(formData: FormData): Promise<ActionState> {
   try {
     await requireAdmin();
@@ -793,40 +1026,75 @@ export async function removeStaffAction(formData: FormData): Promise<ActionState
         select: {
           id: true,
           userId: true,
+          status: true,
           user: {
             select: {
               firstName: true,
-              customerProfile: { select: { id: true } },
               adminProfile: { select: { id: true } },
             },
           },
-          _count: { select: { assignments: true } },
         },
       });
       if (!member) throw new Error("Staff member not found.");
-      if (member._count.assignments > 0) {
-        throw new Error("Remove this staff member from all assigned events before deleting them.");
-      }
+      if (member.status === StaffStatus.SUSPENDED) throw new Error("This staff member's access has already been removed.");
       if (member.user.adminProfile) {
         throw new Error("This person is also an administrator. Remove their admin role instead.");
       }
-      const customerRole = await tx.role.findUniqueOrThrow({ where: { key: RoleKey.CUSTOMER } });
-      await tx.staff.delete({ where: { id } });
-      // Demoting to customer keeps the existing approval, because the admin
-      // already decided this person may use the system; only the role changes.
-      await tx.user.update({ where: { id: member.userId }, data: { roleId: customerRole.id } });
-      if (!member.user.customerProfile) {
-        await tx.customer.create({ data: { userId: member.userId } });
-      }
-      return { firstName: member.user.firstName, userId: member.userId, previousRole: RoleKey.STAFF };
+
+      // Removal must not delete the Staff row: every BookingStaff assignment
+      // points at it, and those are the only record of the work this person
+      // did. Suspending the row keeps the history the admin still needs while
+      // making the account unusable.
+      await tx.staff.update({
+        where: { id },
+        data: {
+          status: StaffStatus.SUSPENDED,
+          isAvailable: false,
+          adminId: null,
+          inviteToken: null,
+          inviteExpiresAt: null,
+        },
+      });
+      await tx.user.update({
+        where: { id: member.userId },
+        data: {
+          isActive: false,
+          accountStatus: AccountStatus.SUSPENDED,
+          suspendedAt: new Date(),
+          suspensionReason: "Staff access removed by an administrator.",
+        },
+      });
+
+      // Burn every outstanding activation link and verification code. An old
+      // invite must not be able to revive the account after this decision.
+      await tx.activationToken.updateMany({ where: { userId: member.userId, usedAt: null }, data: { usedAt: new Date() } });
+      await tx.otpChallenge.updateMany({ where: { userId: member.userId, consumedAt: null }, data: { consumedAt: new Date() } });
+
+      return { firstName: member.user.firstName, userId: member.userId };
     });
-    await recordSecurityEvent({ type: "ROLE_CHANGED", userId: result.userId, detail: `Staff member removed and demoted to customer.` });
+
+    // Suspension already blocks every request, so a failure to revoke cannot
+    // restore access. Revoking is still what makes the current browser sign out
+    // immediately instead of showing a stale cached page.
+    await revokeAllSessions(result.userId, "Staff access removed by an administrator.").catch((error) => {
+      console.error("[staff] session revocation failed after removal", error);
+    });
+    await recordSecurityEvent({
+      type: "ACCOUNT_SUSPENDED",
+      userId: result.userId,
+      detail: "Staff access removed. The staff row and previous assignments were kept for history.",
+    });
     revalidatePath("/admin/staff");
     revalidatePath("/admin/security");
+    revalidatePath("/admin/admins");
     revalidatePath("/staff");
     revalidatePath("/admin/bookings");
+    revalidatePath("/admin/events");
     emitAdminEvent("staff.updated", { entityId: id, action: "removed" });
-    return { success: `${result.firstName} was removed from the staff team.`, error: null };
+    return {
+      success: `${result.firstName}'s staff access was removed. Their previous assignments remain available in the admin history.`,
+      error: null,
+    };
   } catch (error) {
     return { success: null, error: messageFromError(error) };
   }
@@ -849,18 +1117,45 @@ export async function assignStaffAction(formData: FormData): Promise<ActionState
       const assignableStatuses: BookingStatus[] = [BookingStatus.PENDING, BookingStatus.APPROVED, BookingStatus.PREPARING];
       if (!assignableStatuses.includes(booking.status)) throw new Error("Staff can only be assigned to active bookings.");
       if (!staff.isAvailable) throw new Error("That staff member is currently unavailable.");
-      const conflict = await tx.bookingStaff.findFirst({
-        where: {
-          staffId,
-          bookingId: { not: bookingId },
-          booking: {
-            eventDate: { gte: new Date(booking.eventDate.getTime() - 12 * 60 * 60 * 1000), lte: new Date(booking.eventDate.getTime() + 12 * 60 * 60 * 1000) },
-            status: { in: ["APPROVED", "PREPARING"] },
-          },
-        },
+      /*
+       * The same person cannot be put on the same event twice.
+       *
+       * The insert used to be an upsert with an empty update, so a second
+       * attempt was swallowed and the admin was told "Staff member assigned to
+       * the booking" — as though something had happened. It had not: the
+       * roster still had one row, and the duplicate had quietly been the
+       * reason the drop-down still offered somebody who was already on the
+       * event.
+       */
+      const alreadyOnThisBooking = await tx.bookingStaff.findUnique({
+        where: { bookingId_staffId: { bookingId, staffId } },
+        select: { id: true },
       });
-      if (conflict) throw new Error("That staff member is already assigned to an event on this date.");
-      await tx.bookingStaff.upsert({ where: { bookingId_staffId: { bookingId, staffId } }, update: {}, create: { bookingId, staffId } });
+      if (alreadyOnThisBooking) throw new Error("That staff member is already assigned to this event.");
+      /*
+       * The same person cannot work two events that overlap.
+       *
+       * The check used to be a twelve-hour window around the first day, which
+       * was wrong twice over once an event could run for more than one day: an
+       * event running from the 2nd to the 4th clashed with nothing booked on
+       * the 3rd, so the same person could be sent to two places on one day.
+       *
+       * The whole range is compared now, and only events that are still live
+       * count. A released assignment — one whose event has already happened —
+       * is history, not a commitment, so it does not stand in the way of the
+       * next booking. See `lib/staff-assignment.ts`.
+       */
+      const otherAssignments = await tx.bookingStaff.findMany({
+        where: { staffId, bookingId: { not: bookingId } },
+        select: { booking: { select: { status: true, eventDate: true, durationDays: true } } },
+      });
+      const clash = otherAssignments.find((assignment) => {
+        const other = assignment.booking;
+        if (!isAssignmentLive(other)) return false;
+        return eventRangesOverlap(other, { status: booking.status, eventDate: booking.eventDate, durationDays: booking.durationDays });
+      });
+      if (clash) throw new Error("That staff member is already assigned to an event that overlaps these dates.");
+      await tx.bookingStaff.create({ data: { bookingId, staffId } });
     });
     emitAdminEvent("staff.updated", { entityId: staffId, action: "assigned" });
     revalidatePath(`/admin/bookings/${bookingId}`);
@@ -896,8 +1191,29 @@ export async function unassignStaffAction(formData: FormData): Promise<ActionSta
     const assignmentId = getString(formData, "assignmentId");
     if (!bookingId || !assignmentId) throw new Error("Missing staff assignment.");
     await enforceActionRateLimit("staff-unassignment", bookingId, 30, 60_000);
-    const removed = await prisma.bookingStaff.deleteMany({ where: { id: assignmentId, bookingId } });
-    if (removed.count !== 1) throw new Error("That staff assignment is no longer available.");
+    const assignableStatuses: BookingStatus[] = [BookingStatus.PENDING, BookingStatus.APPROVED, BookingStatus.PREPARING];
+    /*
+     * The roster of a finished event is a record of who worked it, not a list
+     * of people still to be booked. Removing somebody from it would erase
+     * that, and the button is not offered in the first place — but a stale
+     * form post could still try, so the rule is enforced here too.
+     */
+    const assignment = await prisma.bookingStaff.findFirst({
+      where: { id: assignmentId, bookingId },
+      select: { booking: { select: { status: true, eventDate: true, durationDays: true } } },
+    });
+    if (!assignment) throw new Error("That staff member is not assigned to this event.");
+    if (!isAssignmentLive(assignment.booking)) {
+      throw new Error("This event is over, so its team list is a record of who worked it and cannot be changed.");
+    }
+    const removed = await prisma.bookingStaff.deleteMany({
+      where: {
+        id: assignmentId,
+        bookingId,
+        booking: { status: { in: assignableStatuses } },
+      },
+    });
+    if (removed.count !== 1) throw new Error("Staff assignments can only be changed on active bookings.");
     revalidatePath(`/admin/bookings/${bookingId}`);
     revalidatePath("/admin/staff");
     emitAdminEvent("staff.updated", { entityId: assignmentId, action: "unassigned" });
@@ -912,8 +1228,18 @@ export async function cancelBookingAction(formData: FormData): Promise<ActionSta
     const current = await requireCustomer();
     await enforceActionRateLimit("booking-cancel", current.id, 10, 60_000);
     const bookingId = getString(formData, "bookingId");
-    const booking = await prisma.booking.findUnique({ where: { id: bookingId } });
+    const booking = await prisma.booking.findUnique({ where: { id: bookingId }, select: { customerId: true, status: true, paidAmount: true } });
     if (!booking || !current.customerProfile || booking.customerId !== current.customerProfile.id) throw new Error("You cannot cancel this booking.");
+    /*
+     * A request belongs to the customer only while it is still a request. Once
+     * the team has approved it they have committed stock, staff, and a calendar
+     * slot to that date, so undoing it is their decision, not a button on the
+     * customer dashboard. `updateBookingStatus` still lets an administrator
+     * cancel an approved booking (subject to refunding any captured payment).
+     */
+    if (booking.status !== BookingStatus.PENDING) {
+      throw new Error("This booking has already been reviewed. Contact the team to change or cancel it.");
+    }
     if (Number(booking.paidAmount) > 0) throw new Error("Please contact the team to cancel a booking with a recorded payment.");
     await updateBookingStatus(bookingId, "CANCELLED");
     revalidatePath("/customer/dashboard");
@@ -949,6 +1275,31 @@ export async function markNotificationReadAction(formData: FormData): Promise<Ac
     if (updated.count !== 1) throw new Error("Notification not found.");
     revalidatePath("/admin/notifications");
     return { success: "Notification marked as read.", error: null };
+  } catch (error) {
+    return { success: null, error: messageFromError(error) };
+  }
+}
+
+/**
+ * Marks a set of the caller's own notifications as read.
+ *
+ * Used when the reader reaches the page a notification is about by any route,
+ * not only by clicking the notification itself. The ids are scoped to the
+ * caller and to the admin audience, so a request cannot mark somebody else's
+ * notifications read.
+ */
+export async function markNotificationsSeenAction(notificationIds: string[]): Promise<ActionState> {
+  try {
+    const admin = await requireAdmin();
+    const ids = notificationIds.filter((id) => typeof id === "string" && id.length > 0).slice(0, 50);
+    if (ids.length === 0) return { success: null, error: null };
+    await enforceActionRateLimit("notification-seen", admin.id, 120, 60_000);
+    await prisma.notification.updateMany({
+      where: { id: { in: ids }, userId: admin.id, audience: "ADMIN" },
+      data: { read: true },
+    });
+    revalidatePath("/admin/notifications");
+    return { success: "Notifications marked as read.", error: null };
   } catch (error) {
     return { success: null, error: messageFromError(error) };
   }
@@ -1150,6 +1501,39 @@ export async function removeAdminAction(formData: FormData): Promise<ActionState
   }
 }
 
+/**
+ * Erases a customer's personal details from the customer directory.
+ *
+ * Super admin only, enforced in `removeCustomerAccess` as well as here so the
+ * rule cannot be bypassed by calling the service directly. The bookings are
+ * deliberately left alone — the confirmation screen says as much — because they
+ * are the business's own records, not the customer's data.
+ */
+export async function removeCustomerAction(formData: FormData): Promise<ActionState> {
+  try {
+    const reviewer = await requireSuperAdmin();
+    const customerId = getString(formData, "customerId");
+    if (!customerId) throw new Error("Missing customer.");
+    await enforceActionRateLimit("customer-remove", customerId, 20, 60_000);
+    const result = await removeCustomerAccess({
+      reviewer: { id: reviewer.id, role: reviewer.role },
+      customerId,
+      reason: getOptionalString(formData, "reason") ?? null,
+      ipAddress: await requestIp(),
+    });
+    revalidatePath("/admin/customers");
+    revalidatePath("/admin/bookings");
+    revalidatePath("/admin/payments");
+    revalidatePath("/admin/invoices");
+    revalidatePath("/admin/dashboard");
+    revalidatePath("/admin/security");
+    const kept = result.bookings === 1 ? "1 booking was kept" : `${result.bookings} bookings were kept`;
+    return { success: `${result.firstName} was removed from the customer directory. ${kept}.`, error: null };
+  } catch (error) {
+    return { success: null, error: messageFromError(error) };
+  }
+}
+
 export async function reviewAdminRequestAction(formData: FormData): Promise<ActionState> {
   try {
     const requestId = getString(formData, "requestId");
@@ -1188,8 +1572,9 @@ export async function reviewAdminRequestAction(formData: FormData): Promise<Acti
     revalidatePath("/staff");
     if (decision === "REJECTED") return { success: "Access request declined.", error: null };
     const roleLabel = approvedStaffType ? approvedStaffType.toLowerCase().replaceAll("_", " ") : "approved";
-    const shared = "activationUrl" in outcome && outcome.activationUrl ? `\n\nActivation link: ${outcome.activationUrl}` : "";
-    return { success: `Access request approved (${roleLabel}).${shared}`, error: null };
+    // The invitation email is delivered after this response; the member's
+    // activation link is not returned to the browser.
+    return { success: `Access request approved (${roleLabel}). The invitation email is on its way.`, error: null };
   } catch (error) {
     return { success: null, error: messageFromError(error) };
   }
@@ -1207,12 +1592,25 @@ export async function saveBusinessSettingsAction(formData: FormData): Promise<Ac
       city: getString(formData, "city"),
       taxRate: getNumber(formData, "taxRate"),
       currency: getString(formData, "currency"),
+      logoUrl: getString(formData, "logoUrl") || null,
+      logoPublicId: getString(formData, "logoPublicId") || null,
     });
+    // One of the two on its own would be an image whose asset cannot be replaced or
+    // removed later, so the pair is checked before anything is written.
+    assertCloudinaryAssetPair(data.logoUrl || null, data.logoPublicId || null);
+
+    // Read before the write: replacing the logo has to destroy the asset it
+    // replaces, or every logo the business has ever used stays in the bucket
+    // forever. Same rule as the service and package editors.
+    const previous = await prisma.businessSetting.findUnique({ where: { id: "default" }, select: { logoPublicId: true } });
     await prisma.businessSetting.upsert({
       where: { id: "default" },
       update: data,
       create: { id: "default", ...data },
     });
+    if (previous?.logoPublicId && previous.logoPublicId !== data.logoPublicId) {
+      await deleteCloudinaryImage(previous.logoPublicId);
+    }
     revalidatePath("/admin/settings");
     revalidatePath("/customer/bookings/new");
     revalidatePath("/");
@@ -1221,6 +1619,10 @@ export async function saveBusinessSettingsAction(formData: FormData): Promise<Ac
     revalidatePath("/services/[slug]", "page");
     revalidatePath("/packages");
     revalidatePath("/packages/[slug]", "page");
+    // The business profile is cached across requests; drop it so the new name,
+    // logo, and tax rate appear on the very next page rather than in five
+    // minutes.
+    updateTag(BUSINESS_SETTINGS_TAG);
     return { success: "Business settings saved.", error: null };
   } catch (error) {
     return { success: null, error: messageFromError(error) };
@@ -1242,6 +1644,7 @@ export async function requestAdminAccessAction(
       lastName: getString(formData, "lastName"),
       email: getString(formData, "email"),
       requestedRole: getString(formData, "requestedRole"),
+      staffType: getOptionalString(formData, "staffType") || null,
       note: getString(formData, "note"),
     });
     const signedIn = await getCurrentUser();
@@ -1249,6 +1652,9 @@ export async function requestAdminAccessAction(
       fullName: `${data.firstName}${data.lastName ? ` ${data.lastName}` : ""}`,
       email: data.email,
       requestedRole: data.requestedRole,
+      // Required for a staff request: the reviewer approves the role they were
+      // asked for, so it has to reach them rather than defaulting.
+      staffType: data.staffType ?? null,
       note: data.note || null,
       requesterId: signedIn?.id ?? null,
       ipAddress: await requestIp(),

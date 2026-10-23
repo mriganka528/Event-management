@@ -65,9 +65,9 @@ export function SignInForm({ returnTo }: { returnTo?: string }) {
 
       <AuthFeedback state={state} />
 
-      <Button type="submit" disabled={pending} className="w-full">
-        {pending ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <LogIn className="mr-2 h-4 w-4" />}
-        Continue
+      <Button type="submit" disabled={pending} aria-busy={pending || undefined} className="w-full">
+        {pending ? <Loader2 className="mr-2 h-4 w-4 animate-spin" aria-hidden="true" /> : <LogIn className="mr-2 h-4 w-4" aria-hidden="true" />}
+        {pending ? "Signing in…" : "Continue"}
       </Button>
 
       <p className="flex items-start gap-2 text-xs text-[var(--muted)]">

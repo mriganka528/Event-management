@@ -26,22 +26,39 @@ export async function listAdminRecipients(): Promise<AdminRecipients> {
 export async function notifyAdmins(input: { type: NotificationType; title: string; message: string; href?: string }) {
   const admins = await listAdminRecipients();
   if (admins.length === 0) return [];
-  const created = await prisma.notification.createMany({
-    data: admins.map((admin) => ({ userId: admin.id, audience: NotificationAudience.ADMIN, type: input.type, title: input.title, message: input.message })),
-  });
-  const notifications = await prisma.notification.findMany({
-    where: { audience: NotificationAudience.ADMIN, type: input.type, title: input.title, message: input.message, userId: { in: admins.map((a) => a.id) } },
-    orderBy: { createdAt: "desc" },
-    take: created.count,
+  /*
+   * The rows come back with the insert rather than being looked up again.
+   *
+   * Re-reading them by title and message could return an older notification
+   * with the same wording, which would push a stale row over the socket and
+   * show the admin a notification they had already seen.
+   */
+  const notifications = await prisma.notification.createManyAndReturn({
+    data: admins.map((admin) => ({ userId: admin.id, audience: NotificationAudience.ADMIN, type: input.type, title: input.title, message: input.message, href: input.href ?? null })),
   });
   for (const notification of notifications) emitAdminNotification(notification, input.href);
   return notifications;
 }
 
+/**
+ * Best-effort admin notification.
+ *
+ * Payment callers use this after the money movement has committed: a failing
+ * inbox must never turn a recorded payment into an error the admin retries.
+ */
+export async function notifyAdminsSafely(input: { type: NotificationType; title: string; message: string; href?: string }) {
+  try {
+    return await notifyAdmins(input);
+  } catch (error) {
+    console.error("Admin notification failed.", error);
+    return [];
+  }
+}
+
 /** Creates a notification for one user and pushes it over their personal room. */
 export async function notifyUser(userId: string, input: { type: NotificationType; title: string; message: string; href?: string }) {
   const notification = await prisma.notification.create({
-    data: { userId, audience: NotificationAudience.CUSTOMER, type: input.type, title: input.title, message: input.message },
+    data: { userId, audience: NotificationAudience.CUSTOMER, type: input.type, title: input.title, message: input.message, href: input.href ?? null },
   });
   emitUserNotification(userId, notification, input.href);
   return notification;

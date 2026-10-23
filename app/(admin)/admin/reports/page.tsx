@@ -1,10 +1,17 @@
 import Link from "next/link";
+import type { Metadata } from "next";
 import { BarChart3, Download, IndianRupee, PieChart, TrendingUp } from "lucide-react";
 import { getAdminReports } from "@/lib/admin-data";
 import { formatCurrency } from "@/lib/utils";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 
 export const dynamic = "force-dynamic";
+
+export const metadata: Metadata = {
+  title: "Reports",
+  description: "Revenue, outstanding balances, and booking mix by event type and payment method.",
+  robots: { index: false, follow: false, nocache: true },
+};
 
 export default async function ReportsPage() {
   const report = await getAdminReports();

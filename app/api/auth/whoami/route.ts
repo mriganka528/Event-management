@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { getAuthContext } from "@/lib/auth/server";
 import { formatRoleLabel } from "@/lib/role-label";
 import { workspaceForRole } from "@/lib/access-policy";
+import { rateLimitApi } from "@/lib/security";
 
 /**
  * Who the current visitor is, for the public header.
@@ -18,7 +19,11 @@ import { workspaceForRole } from "@/lib/access-policy";
  * `signedIn: false` rather than a 401, because "not signed in" is the expected
  * answer for most traffic and not an error.
  */
-export async function GET() {
+export async function GET(request: Request) {
+  // Every call resolves a session and touches the database, so it is limited
+  // like any other endpoint rather than being treated as free.
+  const limited = rateLimitApi(request, "whoami", { limit: 120, windowMs: 60_000 });
+  if (limited) return limited;
   try {
     const { state, user } = await getAuthContext();
     if (state !== "ACTIVE" || !user || user.mustSetPassword) {

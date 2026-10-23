@@ -1,4 +1,5 @@
 import Link from "next/link";
+import type { Metadata } from "next";
 import { KeyRound, LifeBuoy, MailCheck, ShieldCheck } from "lucide-react";
 import { getAuthContext } from "@/lib/auth/server";
 import { CredentialsForm } from "@/components/auth/credentials-form";
@@ -6,6 +7,12 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 
 export const dynamic = "force-dynamic";
+
+export const metadata: Metadata = {
+  title: "My credentials",
+  description: "Change your own password and review the devices signed in to your account.",
+  robots: { index: false, follow: false, nocache: true },
+};
 
 /**
  * Self-service credential management.

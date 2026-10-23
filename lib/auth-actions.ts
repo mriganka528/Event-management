@@ -1,12 +1,12 @@
 "use server";
 
-import { AccountStatus, OtpChannel, OtpPurpose, RoleKey } from "@prisma/client";
+import { AccountStatus, AdminRequestStatus, OtpChannel, OtpPurpose, RoleKey, StaffType } from "@prisma/client";
 import { headers } from "next/headers";
 import { redirect } from "next/navigation";
 import { z } from "zod";
 import { prisma } from "@/lib/prisma";
 import { getClientIp, allowRequest } from "@/lib/rate-limit";
-import { getAuthContext, HOME_BY_ROLE, requestIp, clearPendingTwoFactor, readPendingTwoFactor } from "@/lib/auth/server";
+import { getAuthContext, HOME_BY_ROLE, requestIp, clearPendingTwoFactor, readPendingTwoFactor, setPendingTwoFactor } from "@/lib/auth/server";
 import { beginSignIn, completeSignIn, issueSession, signOut } from "@/lib/auth/sign-in";
 import { issueOtp, verifyOtp } from "@/lib/auth/otp";
 import { activateWithToken, confirmTwoFactor, enableTwoFactor, resendTeamInvite, submitAccessRequest } from "@/lib/auth/team";
@@ -178,19 +178,70 @@ export async function resendTwoFactorAction(): Promise<AuthActionState> {
 /** Signs the current device out. */
 export async function signOutAction(): Promise<never> {
   const context = await getAuthContext();
+  const wasCustomer = context.user?.role === RoleKey.CUSTOMER;
   await signOut(context.sessionId, context.user?.id ?? null);
-  redirect("/");
+
+  // A customer also holds a session at the identity provider. Clearing only the
+  // local cookie left that session alive, so the next visit to the sign-in page
+  // was answered with "you are already signed in" and the form never appeared.
+  // The provider can only be signed out from its own client, so hand over to a
+  // small screen inside the Clerk provider that ends both halves.
+  redirect(wasCustomer ? "/customer/auth/sign-out" : "/");
 }
 
-/** Public "join the team" request. No sign-in required. */
+/**
+ * Public "join the team" request. No sign-in required.
+ *
+ * This is the most attackable action in the app: it is unauthenticated, it
+ * writes to the database, and it emails every super admin on success. Four
+ * independent brakes sit in front of it, because each covers a case the others
+ * miss — a honeypot and a fill timer stop naive bots, the per-IP and per-address
+ * limits stop one source retrying, and the one-live-request-per-address rule in
+ * `submitAccessRequest` stops a rotating pool of addresses from filling the
+ * review queue. None of them is a substitute for the others.
+ */
 export async function submitAccessRequestAction(_prev: unknown, formData: FormData): Promise<AuthActionState> {
+  // Honeypot: a field a person never sees.
+  //
+  // Reported as a refusal rather than a silent success. Faking a success is the
+  // usual advice, and it was actively harmful here: the field is named so that
+  // browser autofill ignores it, but autofill heuristics are not a guarantee,
+  // and when one did fill it the applicant was told their request had been sent
+  // when no row existed. "Sent" has to mean a row exists — nothing else may
+  // claim it.
+  if (str(formData, "website")) {
+    return { status: "error" as const, error: "We could not send that request. Please reload the page and try again." };
+  }
+  // Fill timer: nobody types five fields and submits in under two seconds.
+  // Both directions matter. A clock running behind the server makes the
+  // difference negative, and reading that as "instant" would silently drop
+  // every genuine submission from that browser — the failure looks like the
+  // form is broken rather than like a rejected bot. A clock wildly ahead is
+  // equally untrustworthy, so both are treated the same way.
+  const renderedAt = Number(str(formData, "renderedAt"));
+  const ageMs = Date.now() - renderedAt;
+  // `Number("")` is `0`, which is finite and decades old, so a submission with
+  // the field stripped entirely used to sail through as "rendered in 1970".
+  // Anything that is not a real timestamp inside a plausible window is refused;
+  // there is no way to prove a human filled this in, and failing open would let
+  // the one control that costs an attacker nothing be the one they remove.
+  const stampIsUsable = Number.isFinite(renderedAt) && renderedAt > 0;
+  const tooFastToBeHuman =
+    !stampIsUsable || (ageMs >= 0 && ageMs < 2000) || ageMs < -60_000;
+  if (tooFastToBeHuman) {
+    return { status: "error" as const, error: "That was submitted too quickly. Please check the form and try again." };
+  }
+
   const parsed = z
     .object({
       fullName: z.string().trim().min(2, "Enter your full name.").max(120),
       email: emailSchema,
       phone: z.string().trim().max(24).optional(),
       requestedRole: z.enum(["ADMIN", "STAFF"]),
-      staffType: z.string().trim().max(40).optional(),
+      // Re-checked against the enum rather than trusted: the value decides the
+      // role the applicant is granted, so a hand-crafted request must not be
+      // able to name one. `nativeEnum` is the form the rest of the codebase uses.
+      staffType: z.nativeEnum(StaffType).optional(),
       note: z.string().trim().max(1000).optional(),
     })
     .safeParse({
@@ -205,13 +256,25 @@ export async function submitAccessRequestAction(_prev: unknown, formData: FormDa
   if (!parsed.success) return { status: "error" as const, error: "Check the highlighted fields.", fieldErrors: fieldErrors(parsed.error) };
 
   const ipAddress = await requestIp();
-  // Tight throttle: this endpoint is public and mails a super admin on success.
-  if (!allowRequest(`join-team:ip:${ipAddress}`, 5, 60 * 60_000)) {
-    return { status: "error" as const, error: "Too many requests from this connection. Try again later." };
-  }
   const emailKey = sha256(parsed.data.email);
-  if (!allowRequest(`join-team:email:${emailKey}`, 3, 24 * 60 * 60_000)) {
-    return { status: "error" as const, error: "You have already sent a request for this address. Check your email for the outcome." };
+  // Checked before any database work, and keyed on a hash so the in-memory map
+  // never holds an address.
+  if (!allowRequest(`join-team:ip:${ipAddress}`, 5, 60 * 60_000)) {
+    return { status: "error" as const, error: "Too many requests from this connection. Try again in an hour." };
+  }
+  if (!allowRequest(`join-team:day:${ipAddress}`, 20, 24 * 60 * 60_000)) {
+    return { status: "error" as const, error: "Too many requests from this connection today. Try again tomorrow." };
+  }
+  // Generous per address, because a declined applicant is allowed to apply
+  // again. The exact one-at-a-time rule lives in the database, where it cannot
+  // be lost by a restart or bypassed by rotating the source address.
+  if (!allowRequest(`join-team:email:${emailKey}`, 8, 24 * 60 * 60_000)) {
+    return { status: "error" as const, error: "Too many requests for this address. Try again tomorrow." };
+  }
+  // A site-wide ceiling. Per-IP limits are useless against a botnet, and every
+  // accepted request costs a real email to every super admin.
+  if (!allowRequest("join-team:global", 60, 60 * 60_000)) {
+    return { status: "error" as const, error: "The request queue is busy right now. Please try again later." };
   }
 
   const context = await getAuthContext();
@@ -220,16 +283,56 @@ export async function submitAccessRequestAction(_prev: unknown, formData: FormDa
     email: parsed.data.email,
     phone: parsed.data.phone ?? null,
     requestedRole: parsed.data.requestedRole,
-    staffType: (parsed.data.staffType as never) ?? null,
+    staffType: parsed.data.staffType ?? null,
     note: parsed.data.note ?? null,
     requesterId: context.user?.id ?? null,
     ipAddress,
   });
-  if (!result.ok) return { status: "error" as const, error: result.message };
+  if (!result.ok) {
+    return {
+      status: "error" as const,
+      error: result.message,
+      // The earlier request travels back with the refusal, so an applicant told
+      // "you already have a request" can see what it was instead of guessing.
+      previousRequest: result.previous ? summariseRequest(result.previous) : undefined,
+    };
+  }
 
+  const firstName = result.request.fullName.split(/\s+/)[0];
   return {
     status: "success" as const,
-    message: `Thanks ${parsed.data.fullName.split(/\s+/)[0]}. Your request was sent to the super admin. You will get an email once a decision is made. Nothing is granted until then.`,
+    message: `Thanks ${firstName}. Your request was sent to the super admin. You will get an email once a decision is made. Nothing is granted until then.`,
+    // Handed back so the confirmation can show exactly what was submitted
+    // rather than a generic "request sent", which left an applicant unable to
+    // confirm they had asked for the right role.
+    request: summariseRequest(result.request),
+  };
+}
+
+/** Trims a stored request down to the fields safe to hand back to the browser. */
+function summariseRequest(request: {
+  id: string;
+  fullName: string;
+  email: string;
+  phone: string | null;
+  requestedRole: RoleKey;
+  requestedStaffType: StaffType | null;
+  note: string | null;
+  createdAt: Date;
+  status?: AdminRequestStatus;
+  reviewedAt?: Date | null;
+}): NonNullable<AuthActionState["request"]> {
+  return {
+    fullName: request.fullName,
+    email: request.email,
+    phone: request.phone,
+    requestedRole: request.requestedRole,
+    requestedStaffType: request.requestedStaffType,
+    note: request.note,
+    reference: request.id.slice(0, 8).toUpperCase(),
+    createdAt: request.createdAt.toISOString(),
+    status: request.status ?? null,
+    reviewedAt: request.reviewedAt ? request.reviewedAt.toISOString() : null,
   };
 }
 
@@ -250,13 +353,67 @@ export async function activateAccountAction(_prev: unknown, formData: FormData):
   const result = await activateWithToken({ token: parsed.data.token, password: parsed.data.password, ipAddress });
   if (!result.ok) return { status: "error" as const, error: result.message };
 
-  const user = await prisma.user.findUnique({ where: { id: result.userId }, select: { role: { select: { key: true } } } });
+  const user = await prisma.user.findUnique({
+    where: { id: result.userId },
+    select: { email: true, phone: true, role: { select: { key: true } } },
+  });
   const privileged = user?.role.key === RoleKey.ADMIN || user?.role.key === RoleKey.SUPER_ADMIN;
-  return {
-    status: "activate" as const,
-    message: "Password set. One more step to protect your account.",
-    next: privileged ? `/two-factor-setup?user=${encodeURIComponent(result.userId)}` : "/sign-in",
-  };
+
+  /*
+   * The pending-2FA cookie is the only thing that tells the next screen which
+   * account just cleared its password. It used to be written only by a normal
+   * sign-in, so an administrator who came from an activation link landed on the
+   * enrolment page with no account attached and was told to sign in again. The
+   * activation link itself proves the address, so it is safe to carry that
+   * identity across a single enrolment step.
+   */
+  await setPendingTwoFactor({ userId: result.userId, channel: "EMAIL" });
+
+  /*
+   * A member who just chose a password should land in their workspace, not be
+   * sent back to a sign-in form to type the same password again.
+   *
+   * The activation link already proved the address, so the code sent here is a
+   * second factor rather than a new sign-in: it is issued for the account that
+   * just activated, and the pending-2FA cookie tells `/verify-two-factor` which
+   * account it belongs to. Completing the code then issues the session and
+   * redirects to the role's home page. Privileged accounts keep the enrolment
+   * flow, because they still have to choose and confirm a second factor.
+   */
+  if (!privileged) {
+    const destination = user?.email ?? "";
+    const issued = await issueOtp({
+      userId: result.userId,
+      email: destination,
+      phone: user?.phone ?? null,
+      channel: OtpChannel.EMAIL,
+      purpose: OtpPurpose.TWO_FACTOR,
+      ipAddress,
+    });
+    if (!issued.ok) {
+      // The password is already set even if the code could not be delivered, so
+      // fall back to the normal sign-in screen. Signing in can request a fresh
+      // code without another invitation.
+      await clearPendingTwoFactor();
+      redirect("/sign-in");
+    }
+
+    const roleHome = HOME_BY_ROLE[user?.role.key ?? RoleKey.CUSTOMER];
+    /*
+     * Redirect on the server rather than returning a `verify` state for the
+     * client to follow.
+     *
+     * The activation token is single-use and was just consumed by
+     * `activateWithToken`. A server action that returns state causes the
+     * activation page to re-render, and that render inspects the same token,
+     * sees it is used, and replaces the form with "this link cannot be used"
+     * before the client-side redirect can run. A server redirect skips that
+     * render entirely and lands directly on the code screen.
+     */
+    redirect(`/verify-two-factor?channel=email&returnTo=${encodeURIComponent(roleHome)}`);
+  }
+
+  redirect(`/two-factor-setup?user=${encodeURIComponent(result.userId)}`);
 }
 
 /** Sends the enrolment code for the chosen second factor. */

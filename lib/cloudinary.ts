@@ -1,11 +1,14 @@
 import "server-only";
 
+import { Readable } from "node:stream";
 import { v2 as cloudinary, type UploadApiResponse } from "cloudinary";
+import { MANAGED_PREFIX } from "@/lib/cloudinary-assets";
+
+export { assertCloudinaryAssetPair, isManagedCloudinaryUrl } from "@/lib/cloudinary-assets";
 
 const MAX_IMAGE_BYTES = 10 * 1024 * 1024;
 const ALLOWED_MIME_TYPES = new Set(["image/jpeg", "image/png", "image/webp", "image/avif"]);
-const ALLOWED_FOLDERS = new Set(["general", "packages", "services", "inventory"]);
-const MANAGED_PREFIX = "event-management/";
+const ALLOWED_FOLDERS = new Set(["general", "packages", "services", "inventory", "business"]);
 
 function getCloudinaryConfig() {
   const cloudName = process.env.CLOUDINARY_CLOUD_NAME ?? process.env.NEXT_PUBLIC_CLOUDINARY_CLOUD_NAME;
@@ -31,13 +34,43 @@ export async function uploadCloudinaryImage(file: File, folder: string): Promise
   if (!ALLOWED_FOLDERS.has(folder)) throw new Error("Invalid upload folder.");
   await validateCloudinaryImage(file);
   getCloudinaryConfig();
-  const buffer = Buffer.from(await file.arrayBuffer());
+
   return new Promise((resolve, reject) => {
-    const stream = cloudinary.uploader.upload_stream({ folder: `${MANAGED_PREFIX}${folder}`, resource_type: "image", overwrite: false, use_filename: false, unique_filename: true, transformation: [{ width: 2400, height: 2400, crop: "limit" }], quality: "auto:good" }, (error, result) => {
-      if (error || !result) { reject(error ?? new Error("Cloudinary did not return an upload result.")); return; }
-      resolve(result);
-    });
-    stream.end(buffer);
+    const stream = cloudinary.uploader.upload_stream(
+      {
+        folder: `${MANAGED_PREFIX}${folder}`,
+        resource_type: "image",
+        overwrite: false,
+        use_filename: false,
+        unique_filename: true,
+        /*
+         * 1600px rather than 2400px, and no `crop`.
+         *
+         * These images are shown as card art and in table thumbnails — the
+         * largest is a full-width hero at roughly 700 CSS pixels. A 2400px
+         * `crop: limit` box therefore spent seconds of CPU and bandwidth
+         * re-encoding pixels nobody ever sees. `crop: scale` downscales only,
+         * which keeps every dimension intact and is materially cheaper, and the
+         * bound matches what the browser is given.
+         */
+        transformation: [{ width: 1600, crop: "scale" }],
+        quality: "auto:good",
+        // Re-encode to a single modern format instead of storing whatever the
+        // phone produced. A 12 MP HEIC/PNG often becomes a tenth of the size.
+        fetch_format: "auto",
+      },
+      (error, result) => {
+        if (error || !result) {
+          reject(error ?? new Error("Cloudinary did not return an upload result."));
+          return;
+        }
+        resolve(result);
+      },
+    );
+    // Streamed rather than buffered: `arrayBuffer()` pulled the whole file into
+    // memory first, and a burst of phone photos could exhaust the heap before a
+    // single byte reached Cloudinary.
+    Readable.fromWeb(file.stream() as Parameters<typeof Readable.fromWeb>[0]).pipe(stream);
   });
 }
 
@@ -48,19 +81,6 @@ export async function deleteCloudinaryImage(publicId: string | null | undefined)
     await cloudinary.uploader.destroy(publicId, { resource_type: "image", invalidate: true });
   } catch (error) {
     console.error("Cloudinary cleanup failed", error);
-  }
-}
-
-export function assertCloudinaryAssetPair(imageUrl: string | null | undefined, publicId: string | null | undefined) {
-  if (!publicId && !imageUrl) return;
-  if (publicId && (!publicId.startsWith(MANAGED_PREFIX) || publicId.includes(".."))) throw new Error("Invalid Cloudinary asset reference.");
-  if (imageUrl && publicId) {
-    try {
-      const path = decodeURIComponent(new URL(imageUrl).pathname);
-      if (!path.endsWith(`/${publicId}`)) throw new Error("Cloudinary asset reference mismatch.");
-    } catch {
-      throw new Error("Invalid Cloudinary asset URL.");
-    }
   }
 }
 

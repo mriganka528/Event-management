@@ -2,6 +2,7 @@ export type NotificationLinkType =
   | "BOOKING_APPROVED"
   | "BOOKING_REJECTED"
   | "PAYMENT_RECEIVED"
+  | "PAYMENT_REQUESTED"
   | "EVENT_REMINDER"
   | "NEW_BOOKING_REQUEST"
   | "LOW_INVENTORY"
@@ -28,6 +29,7 @@ const ADMIN_LINKS: Record<string, string> = {
   UPCOMING_EVENT: "/admin/calendar",
   LOW_INVENTORY: "/admin/inventory",
   PAYMENT_RECEIVED: "/admin/payments",
+  PAYMENT_REQUESTED: "/admin/payments",
   STAFF_REQUEST: "/admin/admins",
   STAFF_INVITE: "/admin/staff",
   STAFF_ACTIVATED: "/admin/staff",
@@ -37,6 +39,7 @@ const CUSTOMER_LINKS: Record<string, string> = {
   BOOKING_APPROVED: "/customer/dashboard",
   BOOKING_REJECTED: "/customer/dashboard",
   PAYMENT_RECEIVED: "/customer/dashboard",
+  PAYMENT_REQUESTED: "/customer/dashboard",
   EVENT_REMINDER: "/customer/dashboard",
   STAFF_INVITE: "/staff",
 };
@@ -47,8 +50,17 @@ export function notificationHref(type: string, audience: "ADMIN" | "CUSTOMER", e
   return map[type] ?? (audience === "ADMIN" ? "/admin" : "/customer/dashboard");
 }
 
+/**
+ * The link a notification points at.
+ *
+ * The stored `href` wins, because it is the one that was recorded when the
+ * event happened: a cash payment awaiting approval points at the approvals
+ * screen, while the same notification type created elsewhere points at the
+ * payments list. The per-type map is the fallback for a notification that
+ * predates the column or was created without one.
+ */
 export function toNotificationView(
-  notification: { id: string; title: string; message: string; type: string; read: boolean; createdAt: Date | string },
+  notification: { id: string; title: string; message: string; type: string; read: boolean; createdAt: Date | string; href?: string | null },
   audience: "ADMIN" | "CUSTOMER",
   explicitHref?: string,
 ): NotificationView {
@@ -59,6 +71,6 @@ export function toNotificationView(
     type: String(notification.type),
     read: notification.read,
     createdAt: typeof notification.createdAt === "string" ? notification.createdAt : notification.createdAt.toISOString(),
-    href: notificationHref(String(notification.type), audience, explicitHref),
+    href: notificationHref(String(notification.type), audience, explicitHref ?? notification.href ?? undefined),
   };
 }

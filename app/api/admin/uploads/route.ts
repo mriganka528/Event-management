@@ -41,7 +41,12 @@ export async function POST(request: Request) {
       return withNoStore(NextResponse.json({ error: error.code === "UNAUTHENTICATED" ? "Sign in to continue." : "You are not authorized to perform this action." }, { status: error.code === "UNAUTHENTICATED" ? 401 : 403 }));
     }
     const message = error instanceof Error ? error.message : "Image upload failed.";
-    const status = message.includes("not configured") ? 503 : message.includes("Upload") || message.includes("Images") || message.includes("folder") ? 400 : 500;
-    return withNoStore(NextResponse.json({ error: status === 500 ? "Image upload failed. Please try again." : message }, { status }));
+    // Configuration and caller mistakes are reported verbatim so the field can
+    // show why the upload was refused; anything unexpected stays opaque rather
+    // than leaking a Cloudinary API error into the browser.
+    if (message.includes("not configured")) return withNoStore(NextResponse.json({ error: message }, { status: 503 }));
+    const clientFault = ["Upload a", "Images must", "not a valid image", "Invalid upload folder", "Choose an image"].some((fragment) => message.includes(fragment));
+    if (clientFault) return withNoStore(NextResponse.json({ error: message }, { status: 400 }));
+    return withNoStore(NextResponse.json({ error: "Image upload failed. Please try again." }, { status: 500 }));
   }
 }

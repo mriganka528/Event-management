@@ -1,4 +1,5 @@
 import Link from "next/link";
+import type { Metadata } from "next";
 import { AlertTriangle, ArrowRight, CalendarDays, Clock3, IndianRupee, Package2, Sparkles, Ticket } from "lucide-react";
 import { getAdminDashboardData } from "@/lib/admin-data";
 import { formatCurrency, formatCurrencyCompact, formatDateShort } from "@/lib/utils";
@@ -8,6 +9,12 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/com
 import { EmptyState } from "@/components/forms/empty-state";
 
 export const dynamic = "force-dynamic";
+
+export const metadata: Metadata = {
+  title: "My dashboard",
+  description: "Bookings, revenue, upcoming events, and stock that needs attention.",
+  robots: { index: false, follow: false, nocache: true },
+};
 
 export default async function AdminDashboardPage() {
   const { metrics, upcoming, recentRequests, lowStock, months } = await getAdminDashboardData();

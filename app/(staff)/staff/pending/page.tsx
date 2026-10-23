@@ -40,7 +40,7 @@ export default async function StaffPendingPage() {
         <div className="flex items-start gap-3">
           <ShieldQuestion className="mt-0.5 h-5 w-5 shrink-0 text-[var(--muted)]" />
           <div className="space-y-2 text-sm text-[var(--muted-strong)]">
-            <p className="font-semibold text-[var(--foreground)]">Signed in as {user?.email}</p>
+            <p className="break-all font-semibold text-[var(--foreground)]">Signed in as {user?.email}</p>
             <p>
               The invitation was sent to this address. If it has expired, ask a super admin to send a new one from the Admins page. Activation links
               can only be used once.

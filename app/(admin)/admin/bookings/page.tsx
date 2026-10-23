@@ -1,4 +1,5 @@
 import Link from "next/link";
+import type { Metadata } from "next";
 import { BookingStatus, EventType } from "@prisma/client";
 import { CalendarDays, Clock3, IndianRupee, Receipt, Ticket } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
@@ -13,7 +14,18 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import { getAdminBookings } from "@/lib/admin-bookings";
-import { cn, formatCurrency, formatDate } from "@/lib/utils";
+import { bookingStatusBadgeClass } from "@/lib/booking-status";
+import { AdminSearch } from "@/components/admin/admin-search";
+import { cn, formatCurrency, formatDate, formatEventDate } from "@/lib/utils";
+import { normalizeQuery, rowFilter, rowText } from "@/lib/search";
+
+export const dynamic = "force-dynamic";
+
+export const metadata: Metadata = {
+  title: "Bookings",
+  description: "Every booking request, its status, and the actions still outstanding.",
+  robots: { index: false, follow: false, nocache: true },
+};
 
 const statusOptions = [
   { label: "All bookings", value: "all" },
@@ -22,22 +34,6 @@ const statusOptions = [
     value: status,
   })),
 ] as const;
-
-function getStatusBadgeClass(status: BookingStatus) {
-  switch (status) {
-    case BookingStatus.APPROVED:
-      return "bg-emerald-100 text-emerald-800";
-    case BookingStatus.PREPARING:
-      return "bg-blue-100 text-blue-800";
-    case BookingStatus.COMPLETED:
-      return "bg-stone-900 text-stone-50";
-    case BookingStatus.CANCELLED:
-    case BookingStatus.REJECTED:
-      return "bg-red-100 text-red-800";
-    default:
-      return "bg-amber-100 text-amber-800";
-  }
-}
 
 function formatEventType(eventType: EventType) {
   return eventType.charAt(0) + eventType.slice(1).toLowerCase();
@@ -50,13 +46,19 @@ function formatStatusLabel(status: BookingStatus) {
 export default async function BookingsPage({
   searchParams,
 }: {
-  searchParams: Promise<{ status?: string }>;
+  searchParams: Promise<{ status?: string; q?: string }>;
 }) {
-  const { status } = await searchParams;
+  const { status, q } = await searchParams;
+  const query = normalizeQuery(q);
   const activeStatus = Object.values(BookingStatus).includes(status as BookingStatus)
     ? (status as BookingStatus)
     : undefined;
   const { bookings, metrics } = await getAdminBookings(activeStatus);
+  // Search only narrows the rows: the status selector still decides which
+  // bookings are loaded at all, and the metric cards stay on the full set.
+  const visibility = rowFilter(query);
+  const bookingText = (booking: (typeof bookings)[number]) =>
+    rowText(booking.id, booking.customer.user.firstName, booking.customer.user.lastName, booking.customer.user.email, booking.eventType, booking.location, booking.status);
 
   const totalRevenue = bookings.reduce((sum, booking) => sum + Number(booking.totalAmount), 0);
   const amountCollected = bookings.reduce((sum, booking) => sum + Number(booking.paidAmount), 0);
@@ -67,6 +69,10 @@ export default async function BookingsPage({
 
   return (
     <main className="space-y-6">
+      <AdminSearch
+        label="Search bookings"
+        placeholder="Search by reference, customer, email, event type, or location…"
+      />
       <section className="relative overflow-hidden rounded-[32px] border border-[var(--line)] bg-[color:color-mix(in_srgb,var(--card)_90%,transparent)] p-6 shadow-[0_20px_55px_rgba(61,40,14,0.08)] sm:p-8">
         <div className="absolute inset-0 bg-[radial-gradient(circle_at_top_right,rgba(211,138,22,0.18),transparent_30%),linear-gradient(140deg,rgba(255,255,255,0.45),transparent_60%)]" />
         <div className="relative flex flex-col gap-6 lg:flex-row lg:items-end lg:justify-between">
@@ -85,17 +91,17 @@ export default async function BookingsPage({
             </div>
           </div>
           <div className="grid gap-3 sm:grid-cols-2">
-            <div className="rounded-[24px] border border-[rgba(53,41,26,0.08)] bg-[rgba(255,255,255,0.78)] px-5 py-4 shadow-sm">
+            <div className="rounded-[24px] border border-[var(--line)] bg-[var(--card)] px-5 py-4 shadow-sm">
               <p className="text-xs uppercase tracking-[0.24em] text-[var(--muted)]">Collected</p>
               <p className="mt-2 text-2xl font-semibold text-[var(--foreground)]">
                 {formatCurrency(amountCollected)}
               </p>
               <p className="mt-1 text-sm text-[var(--muted)]">Across current visible bookings</p>
             </div>
-            <div className="rounded-[24px] border border-[rgba(53,41,26,0.08)] bg-[rgba(35,27,21,0.95)] px-5 py-4 text-white shadow-sm">
-              <p className="text-xs uppercase tracking-[0.24em] text-white/60">Projected value</p>
-              <p className="mt-2 text-2xl font-semibold">{formatCurrency(totalRevenue)}</p>
-              <p className="mt-1 text-sm text-white/70">Filtered booking portfolio total</p>
+            <div className="rounded-[24px] border border-[var(--brand)]/35 bg-[var(--brand-soft)] px-5 py-4 shadow-sm">
+              <p className="text-xs uppercase tracking-[0.24em] text-[var(--brand-dark)]">Projected value</p>
+              <p className="mt-2 text-2xl font-semibold text-[var(--foreground)]">{formatCurrency(totalRevenue)}</p>
+              <p className="mt-1 text-sm text-[var(--muted)]">Filtered booking portfolio total</p>
             </div>
           </div>
         </div>
@@ -215,14 +221,17 @@ export default async function BookingsPage({
                   </TableHeader>
                   <TableBody>
                     {bookings.map((booking) => (
-                      <TableRow key={booking.id}>
+                      <TableRow key={booking.id} data-row-id={booking.id} data-row-text={bookingText(booking)} style={visibility(bookingText(booking))}>
                         <TableCell>
-                          <div className="space-y-1">
-                            <p className="font-medium text-stone-900">
+                          <div className="min-w-[220px] space-y-1">
+                            <p className="break-words font-medium text-stone-900">
                               {booking.customer.user.firstName} {booking.customer.user.lastName ?? ""}
                             </p>
-                            <p className="text-sm text-stone-500">{booking.customer.user.email}</p>
-                            <p className="text-sm text-stone-500">
+                            {/* A floor on the cell plus a break inside it: the
+                                table scrolls sideways rather than the address
+                                escaping the column. */}
+                            <p className="break-all text-sm text-stone-500">{booking.customer.user.email}</p>
+                            <p className="break-words text-sm text-stone-500">
                               {booking.customer.user.phone ?? "Phone not added"}
                             </p>
                           </div>
@@ -236,7 +245,7 @@ export default async function BookingsPage({
                             <p className="text-sm text-stone-500">{booking.guestCount} guests</p>
                           </div>
                         </TableCell>
-                        <TableCell>{formatDate(booking.eventDate)}</TableCell>
+                        <TableCell>{formatEventDate(booking.eventDate)}</TableCell>
                         <TableCell>{booking.package?.name ?? "Custom services"}</TableCell>
                         <TableCell>
                           <div className="space-y-1">
@@ -252,7 +261,7 @@ export default async function BookingsPage({
                           </div>
                         </TableCell>
                         <TableCell>
-                          <Badge className={getStatusBadgeClass(booking.status)}>
+                          <Badge className={bookingStatusBadgeClass(booking.status)}>
                             {formatStatusLabel(booking.status)}
                           </Badge>
                         </TableCell>
@@ -264,13 +273,6 @@ export default async function BookingsPage({
                                 View
                               </Button>
                             </Link>
-                            {booking.invoice ? (
-                              <Link href={`/api/invoices/${booking.invoice.id}/download`}>
-                                <Button size="sm" variant="outline">
-                                  Invoice
-                                </Button>
-                              </Link>
-                            ) : null}
                           </div>
                         </TableCell>
                       </TableRow>
@@ -283,34 +285,37 @@ export default async function BookingsPage({
         </Card>
 
         <div className="grid gap-6">
-          <Card className="bg-[linear-gradient(180deg,rgba(37,28,22,0.98),rgba(20,16,12,0.98))] text-white shadow-[0_24px_60px_rgba(28,20,12,0.32)]">
+          <Card>
             <CardHeader>
-              <CardTitle className="text-white">Upcoming spotlight</CardTitle>
-              <CardDescription className="text-white/65">
+              <CardTitle>Upcoming spotlight</CardTitle>
+              <CardDescription>
                 Next scheduled bookings from the current filter.
               </CardDescription>
             </CardHeader>
             <CardContent className="grid gap-3">
               {highlightedEvents.length === 0 ? (
-                <p className="text-sm text-white/70">No upcoming events in this selection yet.</p>
+                <p className="text-sm text-[var(--muted)]">No upcoming events in this selection yet.</p>
               ) : (
                 highlightedEvents.map((booking) => (
                   <div
                     key={booking.id}
-                    className="rounded-[22px] border border-white/10 bg-white/5 p-4"
+                    data-row-id={`highlight-${booking.id}`}
+                    data-row-text={bookingText(booking)}
+                    style={visibility(bookingText(booking))}
+                    className="rounded-[22px] border border-[var(--line)] bg-[var(--surface-muted)] p-4"
                   >
                     <div className="flex items-center justify-between gap-3">
                       <p className="font-medium">
                         {booking.customer.user.firstName} {booking.customer.user.lastName ?? ""}
                       </p>
-                      <Badge className="bg-white/10 text-white">
+                      <Badge className={bookingStatusBadgeClass(booking.status)}>
                         {formatStatusLabel(booking.status)}
                       </Badge>
                     </div>
-                    <p className="mt-2 text-sm text-white/70">
+                    <p className="mt-2 text-sm text-[var(--muted)]">
                       {formatEventType(booking.eventType)} at {booking.location}
                     </p>
-                    <p className="mt-1 text-sm text-white/55">{formatDate(booking.eventDate)}</p>
+                    <p className="mt-1 text-sm text-[var(--muted)]">{formatEventDate(booking.eventDate)}</p>
                   </div>
                 ))
               )}
@@ -325,15 +330,15 @@ export default async function BookingsPage({
               </CardDescription>
             </CardHeader>
             <CardContent className="grid gap-3 text-sm text-[var(--muted)]">
-              <div className="rounded-[22px] bg-stone-50 p-4">
+              <div className="rounded-[22px] bg-[var(--surface-muted)] p-4">
                 Customer identity, contact info, and event basics are grouped together for quick
                 approval review.
               </div>
-              <div className="rounded-[22px] bg-stone-50 p-4">
+              <div className="rounded-[22px] bg-[var(--surface-muted)] p-4">
                 Financial columns show total, paid, and balance amounts pulled directly from the
                 booking record.
               </div>
-              <div className="rounded-[22px] bg-stone-50 p-4">
+              <div className="rounded-[22px] bg-[var(--surface-muted)] p-4">
                 Invoice access appears only when an invoice has already been created for that
                 booking.
               </div>

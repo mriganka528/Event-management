@@ -30,18 +30,21 @@ export async function POST(request: Request) {
   if (limited) return limited;
 
   try {
-    const body = (await readJsonBody(request, 16 * 1024)) as { bookingId?: unknown; idempotencyKey?: unknown };
+    const body = (await readJsonBody(request, 16 * 1024)) as { bookingId?: unknown; idempotencyKey?: unknown; amount?: unknown };
     const bookingId = typeof body.bookingId === "string" ? body.bookingId.trim() : "";
     const idempotencyKey = typeof body.idempotencyKey === "string" ? body.idempotencyKey.trim() : request.headers.get("idempotency-key")?.trim() ?? "";
+    // Optional on purpose: older clients send only a booking id and keep paying
+    // the full balance. The server still decides which figures are legal.
+    const requestedAmount = typeof body.amount === "number" && Number.isFinite(body.amount) ? body.amount : undefined;
     if (!bookingId || bookingId.length > 100 || !/^[A-Za-z0-9_-]+$/.test(bookingId) || idempotencyKey.length < 8 || idempotencyKey.length > 160 || !/^[A-Za-z0-9._:-]+$/.test(idempotencyKey)) return withNoStore(NextResponse.json({ error: "A valid booking and idempotency key are required." }, { status: 400 }));
-    const order = await createRazorpayOrderForBooking(bookingId, user.customerProfile.id, idempotencyKey);
+    const order = await createRazorpayOrderForBooking(bookingId, user.customerProfile.id, idempotencyKey, requestedAmount);
     return withNoStore(NextResponse.json(order));
   } catch (error) {
     if (error instanceof RequestBodyTooLargeError) return withNoStore(NextResponse.json({ error: "Request body is too large." }, { status: 413 }));
     if (error instanceof InvalidJsonError) return withNoStore(NextResponse.json({ error: "Invalid JSON body." }, { status: 400 }));
     const message = error instanceof Error ? error.message : "Unable to start payment.";
     const status = message.includes("not configured") ? 503 : message.includes("not found") || message.includes("available") || message.includes("approved") || message.includes("booking") ? 409 : 500;
-    const safeMessage = ["Razorpay is not configured.", "Booking not found.", "Online payment is available after the booking is approved.", "This booking has no available balance for payment.", "This payment attempt is no longer open. Start a new checkout.", "This payment has already been completed.", "That payment attempt belongs to another booking."].includes(message) ? message : "Unable to start payment right now.";
+    const safeMessage = ["Razorpay is not configured.", "Booking not found.", "Online payment is available after the booking is approved.", "This booking has no available balance for payment.", "This payment attempt is no longer open. Start a new checkout.", "This payment has already been completed.", "That payment attempt belongs to another booking.", "That payment amount is not available. Choose the requested installment or the full balance.", "A payment for this amount is already being processed. Finish it, or wait for it to expire."].includes(message) ? message : "Unable to start payment right now.";
     return withNoStore(NextResponse.json({ error: safeMessage }, { status }));
   }
 }

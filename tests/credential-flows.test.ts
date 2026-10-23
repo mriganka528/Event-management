@@ -336,3 +336,51 @@ test("a code that could not be sent is never reported as a wrong password", () =
   assert.equal(codes.length, new Set(codes).size, "an error code is handled twice");
   assert.ok(codes.includes("CODE_NOT_SENT") && codes.includes("CODE_RATE_LIMITED"));
 });
+
+test("a rejected code is never reported as a wrong password", () => {
+  // The regression, and the one users actually hit: `completeSignIn` returned
+  // INVALID_CREDENTIALS for every failure out of `verifyOtp`, so a mistyped code
+  // on the OTP screen said the email and password were wrong — when the password
+  // had already been accepted in step 1. The user re-typed a password that was
+  // right, or went off to reset one that was never the problem.
+  const signIn = source("lib/auth/sign-in.ts");
+  const start = signIn.indexOf("export async function completeSignIn");
+  const end = signIn.indexOf("/** Issues the session cookie", start);
+  const body = signIn.slice(start, end);
+
+  const catchBlock = body
+    .slice(body.indexOf("} catch (error) {"))
+    .split("\n")
+    .filter((line) => !line.trimStart().startsWith("//"))
+    .join("\n");
+  assert.doesNotMatch(catchBlock, /INVALID_CREDENTIALS/, "a rejected code must not be reported as bad credentials");
+  assert.match(catchBlock, /otpFailure\(error\)/, "the OTP failure has to be inspected");
+
+  // One code per outcome, so the message can say what to do next rather than
+  // saying "not correct" for an expired code and a burned one alike.
+  assert.match(signIn, /case "INVALID_CODE":\s*\n\s*return "[^"]*code is not correct/);
+  assert.match(signIn, /case "CODE_EXPIRED":\s*\n\s*return "[^"]*expired/);
+  assert.match(signIn, /case "CODE_ATTEMPTS_EXCEEDED":\s*\n\s*return "[^"]*incorrect attempts/);
+  assert.match(signIn, /case "CODE_SUPERSEDED":\s*\n\s*return "[^"]*no longer valid/);
+
+  // Every OTP outcome has to map somewhere; an unmapped one would silently fall
+  // back to the wrong-code wording, which is how this started.
+  const mapping = signIn.slice(signIn.indexOf("function otpFailure"), signIn.indexOf("async function recentFailures"));
+  for (const code of ["EXPIRED", "TOO_MANY_ATTEMPTS", "NOT_FOUND", "ALREADY_USED"]) {
+    assert.match(mapping, new RegExp(`case "${code}":`), `${code} needs its own wording`);
+  }
+  // The attempts-left countdown is the reason to keep the OTP layer's message.
+  assert.match(mapping, /error instanceof OtpError && error\.message/);
+
+  // The step-2 codes must not exist on step 1, where the password really is what
+  // is being checked, and the OTP screen must show whatever the action returned.
+  assert.match(source("components/auth/two-factor-form.tsx"), /<AuthFeedback state=\{state\} \/>/);
+  assert.doesNotMatch(
+    source("lib/auth-actions.ts").slice(
+      source("lib/auth-actions.ts").indexOf("export async function completeSignInAction"),
+      source("lib/auth-actions.ts").indexOf("export async function resendTwoFactorAction"),
+    ),
+    /INVALID_CREDENTIALS|email and password/,
+    "the action must surface the code failure it was given, verbatim",
+  );
+});

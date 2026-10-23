@@ -1,6 +1,6 @@
 import "server-only";
 
-import { AccountStatus, RoleKey } from "@prisma/client";
+import { AccountStatus, Prisma, RoleKey } from "@prisma/client";
 import { cache } from "react";
 import { cookies, headers } from "next/headers";
 import { redirect } from "next/navigation";
@@ -93,13 +93,26 @@ const USER_SELECT = {
   twoFactorEnabledAt: true,
   mustSetPassword: true,
   lastLoginAt: true,
-  suspensionReason: true,  role: { select: { key: true } },
+  suspensionReason: true,
+  role: { select: { key: true } },
   customerProfile: { select: { id: true } },
   adminProfile: { select: { id: true } },
   staffProfile: { select: { id: true, status: true, staffType: true, isAvailable: true, inviteExpiresAt: true } },
 } as const;
 
-function mapUser(record: Awaited<ReturnType<typeof loadUser>>): AuthUser | null {
+/**
+ * The shared select plus the password hash, which only `isPasswordRequired`
+ * looks at. Kept as one value so the query and the type below cannot drift.
+ */
+const USER_FIELDS = { ...USER_SELECT, passwordHash: true } as const;
+
+/**
+ * The account row every guard reads. Derived from the select rather than written
+ * out, so a column added to one cannot fall out of the other.
+ */
+type UserRecord = Prisma.UserGetPayload<{ select: typeof USER_FIELDS }>;
+
+function mapUser(record: UserRecord | null): AuthUser | null {
   if (!record) return null;
   return {
     id: record.id,
@@ -125,10 +138,6 @@ function mapUser(record: Awaited<ReturnType<typeof loadUser>>): AuthUser | null 
     // and being bounced to an activation screen they can never satisfy.
     mustSetPassword: isPasswordRequired(record),
   };
-}
-
-function loadUser(id: string) {
-  return prisma.user.findUnique({ where: { id }, select: { ...USER_SELECT, passwordHash: true } });
 }
 
 /**
@@ -176,17 +185,26 @@ export const getAuthContext = cache(async (): Promise<AuthSessionContext> => {
   }
 
   const tokenHash = sha256(token);
+
+  // One round trip, not two. Resolving the session and then fetching the account
+  // it belongs to cost a second database query on *every* page of the
+  // application, because every page, layout, and nested server action resolves
+  // the caller through here. `tokenHash` is unique, so the session and its user
+  // can be selected in a single statement.
   const session = await prisma.authSession.findUnique({
     where: { tokenHash },
-    select: { id: true, userId: true, status: true },
+    select: { id: true, status: true, user: { select: USER_FIELDS } },
+    // Prisma's default strategy issues one query per relation. The account row
+    // has four (role, customer, admin, staff), so this resolve cost six Neon
+    // round trips before a page could start. A join makes it one.
+    relationLoadStrategy: "join",
   });
 
   if (!session || session.status !== "ACTIVE") {
     return { state: "UNAUTHENTICATED", user: null, sessionId: null, awaitingTwoFactor: false, twoFactorChannel: null, reason: null };
   }
 
-  const record = await loadUser(session.userId);
-  const user = mapUser(record);
+  const user = mapUser(session.user);
   if (!user) {
     return { state: "UNAUTHENTICATED", user: null, sessionId: null, awaitingTwoFactor: false, twoFactorChannel: null, reason: null };
   }

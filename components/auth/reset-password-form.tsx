@@ -83,13 +83,13 @@ export function ResetPasswordForm({ email }: { email: string }) {
 
       <AuthFeedback state={state} />
 
-      <Button type="submit" disabled={pending}>
+      <Button type="submit" disabled={pending} aria-busy={pending || undefined}>
         {pending ? (
           <Loader2 className="mr-2 h-4 w-4 animate-spin" aria-hidden="true" />
         ) : (
           <CheckCircle2 className="mr-2 h-4 w-4" aria-hidden="true" />
         )}
-        Save password and sign in
+        {pending ? "Saving your password…" : "Save password and sign in"}
       </Button>
 
       <p className="flex items-start gap-2 text-xs text-[var(--muted)]">

@@ -11,7 +11,7 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@
 import { EmptyState } from "@/components/forms/empty-state";
 
 export const dynamic = "force-dynamic";
-export const metadata: Metadata = { title: "Security log", robots: { index: false, follow: false, nocache: true } };
+export const metadata: Metadata = { title: "Security", description: "An append-only audit feed of sign-ins, blocked routes, and access changes.", robots: { index: false, follow: false, nocache: true } };
 
 /**
  * Severity tones come from the design-system tokens in `app/globals.css`, so the
@@ -49,6 +49,7 @@ const tone: Record<SecurityEventType, Severity> = {
   DEVICE_SESSION_CREATED: "info",
   DEVICE_SESSION_REVOKED: "warning",
   DEVICE_LIMIT_REACHED: "warning",
+  CUSTOMER_REMOVED: "danger",
 };
 
 const label = (type: SecurityEventType) => type.toLowerCase().replaceAll("_", " ");

@@ -2,10 +2,37 @@
 
 import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
-import { CheckCircle2, CreditCard, LoaderCircle } from "lucide-react";
+import { Banknote, CheckCircle2, CreditCard, LoaderCircle } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import { ActionForm } from "@/components/forms/action-form";
+import { SubmitButton } from "@/components/forms/submit-button";
+import { declareCashPaymentFormAction } from "@/lib/form-actions";
 
-export function RazorpayCheckout({ bookingId, amount, businessName = "Event Management" }: { bookingId: string; amount: number; businessName?: string }) {
+const currency = new Intl.NumberFormat("en-IN", { style: "currency", currency: "INR", maximumFractionDigits: 2 });
+
+/**
+ * Razorpay checkout for one booking.
+ *
+ * `amount` is the full outstanding balance. `requestedAmount` is the remainder of
+ * an instalment the team asked for; when it is smaller it becomes its own button,
+ * so the customer can settle the request without accidentally paying everything.
+ * The server re-derives both figures — these props only decide what is offered.
+ */
+export function RazorpayCheckout({
+  bookingId,
+  amount,
+  requestedAmount = null,
+  requestedLabel = null,
+  businessName = "Event Management",
+  pendingCashAmount = null,
+}: {
+  bookingId: string;
+  amount: number;
+  requestedAmount?: number | null;
+  requestedLabel?: string | null;
+  businessName?: string;
+  pendingCashAmount?: number | null;
+}) {
   const router = useRouter();
   const [ready, setReady] = useState(false);
   const [loading, setLoading] = useState(false);
@@ -27,12 +54,29 @@ export function RazorpayCheckout({ bookingId, amount, businessName = "Event Mana
     document.body.appendChild(script);
   }, []);
 
-  async function startPayment() {
+  const installment = requestedAmount !== null && requestedAmount >= 0.01 && requestedAmount < amount - 0.01 ? requestedAmount : null;
+
+  const cashForm = (cashAmount: number) => (
+    <ActionForm action={declareCashPaymentFormAction}>
+      <input type="hidden" name="bookingId" value={bookingId} />
+      <input type="hidden" name="amount" value={cashAmount} />
+      <SubmitButton variant="outline" className="w-full" pendingLabel="Submitting…" disabled={pendingCashAmount !== null}>
+        <Banknote className="mr-2 h-4 w-4" />
+        {pendingCashAmount !== null ? "Cash declaration awaiting approval" : `I paid ${currency.format(cashAmount)} in cash`}
+      </SubmitButton>
+    </ActionForm>
+  );
+
+  async function startPayment(payAmount: number) {
     setLoading(true);
     setMessage(null);
     const idempotencyKey = `checkout_${bookingId}_${crypto.randomUUID?.() ?? `${Date.now()}_${Math.random().toString(36).slice(2)}`}`;
     try {
-      const response = await fetch("/api/payments/razorpay/order", { method: "POST", headers: { "content-type": "application/json", "idempotency-key": idempotencyKey }, body: JSON.stringify({ bookingId, idempotencyKey }) });
+      const response = await fetch("/api/payments/razorpay/order", {
+        method: "POST",
+        headers: { "content-type": "application/json", "idempotency-key": idempotencyKey },
+        body: JSON.stringify({ bookingId, idempotencyKey, amount: payAmount }),
+      });
       const order = (await response.json()) as { keyId?: string; providerOrderId?: string; amountPaise?: number; currency?: string; prefill?: RazorpayOptions["prefill"]; error?: string };
       if (!response.ok || !order.keyId || !order.providerOrderId || !order.amountPaise) throw new Error(order.error ?? "Unable to start secure checkout.");
       if (!window.Razorpay) throw new Error("Secure checkout is still loading. Try again in a moment.");
@@ -41,7 +85,7 @@ export function RazorpayCheckout({ bookingId, amount, businessName = "Event Mana
         amount: order.amountPaise,
         currency: order.currency ?? "INR",
         name: businessName,
-        description: `Balance payment for booking ${bookingId.slice(0, 8).toUpperCase()}`,
+        description: installment !== null ? `Requested installment for booking ${bookingId.slice(0, 8).toUpperCase()}` : `Balance payment for booking ${bookingId.slice(0, 8).toUpperCase()}`,
         order_id: order.providerOrderId,
         prefill: order.prefill,
         notes: { bookingId },
@@ -70,15 +114,51 @@ export function RazorpayCheckout({ bookingId, amount, businessName = "Event Mana
     }
   }
 
-  if (paid) return <div className="rounded-2xl border border-emerald-200 bg-emerald-50 p-4 text-sm text-emerald-900"><CheckCircle2 className="mb-2 h-5 w-5" />{message}</div>;
+  if (paid) return <div className="rounded-2xl border border-[var(--success-soft)] bg-[var(--success-soft)] p-4 text-sm text-[var(--success-text)]"><CheckCircle2 className="mb-2 h-5 w-5" />{message}</div>;
+
+  if (amount <= 0) return null;
 
   return (
     <div className="space-y-2">
-      <Button type="button" className="w-full" disabled={!ready || loading || amount <= 0} onClick={() => void startPayment()}>
-        {loading ? <LoaderCircle className="mr-2 h-4 w-4 animate-spin" /> : <CreditCard className="mr-2 h-4 w-4" />}
-        {loading ? "Processing securely…" : `Pay ${new Intl.NumberFormat("en-IN", { style: "currency", currency: "INR" }).format(amount)} online`}
-      </Button>
-      {message ? <p className="text-xs leading-5 text-[var(--muted)]">{message}</p> : <p className="text-xs leading-5 text-[var(--muted)]">You will be redirected to Razorpay&apos;s secure test checkout.</p>}
+      {installment !== null ? (
+        <>
+          <Button type="button" className="w-full" disabled={!ready || loading} onClick={() => void startPayment(installment)}>
+            {loading ? <LoaderCircle className="mr-2 h-4 w-4 animate-spin" /> : <CreditCard className="mr-2 h-4 w-4" />}
+            {loading ? "Opening secure checkout…" : `Pay ${currency.format(installment)} requested`}
+          </Button>
+          <Button type="button" variant="outline" className="w-full" disabled={!ready || loading} onClick={() => void startPayment(amount)}>
+            Pay full balance {currency.format(amount)}
+          </Button>
+          <div className="border-t border-[var(--line)] pt-3">
+            <div className="grid gap-2">
+              {cashForm(installment)}
+              {cashForm(amount)}
+            </div>
+            <p className="mt-2 text-xs leading-5 text-[var(--muted)]">
+              Choose a cash option only after handing the cash to our team. The amount is added to your booking after an admin confirms receipt.
+            </p>
+          </div>
+          <p className="text-xs leading-5 text-[var(--muted)]">
+            {requestedLabel ? `${requestedLabel} requested by the team. ` : "The team requested a part payment. "}
+            You can pay just the requested amount now and the rest later.
+          </p>
+        </>
+      ) : (
+        <>
+          <Button type="button" className="w-full" disabled={!ready || loading} onClick={() => void startPayment(amount)}>
+            {loading ? <LoaderCircle className="mr-2 h-4 w-4 animate-spin" /> : <CreditCard className="mr-2 h-4 w-4" />}
+            {loading ? "Opening secure checkout…" : `Pay ${currency.format(amount)} online`}
+          </Button>
+          <div className="border-t border-[var(--line)] pt-3">
+            {cashForm(amount)}
+            <p className="mt-2 text-xs leading-5 text-[var(--muted)]">
+              Choose this only after handing the cash to our team. The amount is added to your booking after an admin confirms receipt.
+            </p>
+          </div>
+          <p className="text-xs leading-5 text-[var(--muted)]">You will be redirected to Razorpay&apos;s secure checkout.</p>
+        </>
+      )}
+      {message ? <p className="text-xs leading-5 text-[var(--danger-text)]">{message}</p> : null}
     </div>
   );
 }

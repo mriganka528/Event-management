@@ -1,31 +1,8 @@
 import { NextResponse } from "next/server";
 import { checkRateLimit, getClientIp } from "@/lib/rate-limit";
+import { isSameOrigin } from "@/lib/origin";
 
 const DEFAULT_MAX_BODY_BYTES = 128 * 1024;
-
-function configuredSiteOrigin() {
-  const value = process.env.NEXT_PUBLIC_SITE_URL;
-  if (!value) return null;
-  try {
-    return new URL(value).origin;
-  } catch {
-    return null;
-  }
-}
-
-export function isSameOrigin(request: Request) {
-  const origin = request.headers.get("origin");
-  if (!origin) return process.env.NODE_ENV !== "production";
-  const allowed = new Set<string>([new URL(request.url).origin]);
-  const siteOrigin = configuredSiteOrigin();
-  if (siteOrigin) allowed.add(siteOrigin);
-  const host = request.headers.get("host");
-  if (host) {
-    const protocol = request.headers.get("x-forwarded-proto")?.split(",")[0]?.trim() || new URL(request.url).protocol.replace(":", "");
-    allowed.add(`${protocol}://${host}`);
-  }
-  return allowed.has(origin);
-}
 
 export function rejectCrossSiteMutation(request: Request) {
   if (["GET", "HEAD", "OPTIONS"].includes(request.method) || isSameOrigin(request)) return null;

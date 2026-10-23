@@ -1,6 +1,9 @@
 ﻿import { NextResponse, type NextRequest } from "next/server";
 import { clerkMiddleware } from "@clerk/nextjs/server";
 import { isHttps, pendingTwoFactorCookieName, sessionCookieName } from "@/lib/auth/cookie-names";
+import { redirectTo } from "@/lib/http-redirect";
+import { CUSTOMER_COMPLETE_PATH, EXCHANGE_REFUSAL_PARAM } from "@/lib/auth/customer-exchange";
+import { configuredSiteOrigin, isSameOrigin } from "@/lib/origin";
 
 /**
  * Edge middleware.
@@ -69,6 +72,20 @@ const CUSTOMER_SIGN_UP_PATH = `${CUSTOMER_AUTH_PREFIX}/sign-up`;
 /** Superseded by {@link CUSTOMER_SIGN_UP_PATH}; kept working as an alias. */
 const LEGACY_REGISTER_PATH = "/register";
 
+/**
+ * Where the local session is minted for a customer who just came back from the
+ * sign-in provider.
+ *
+ * The hop is made here, at the edge, rather than by the completion page itself.
+ * A `redirect()` in a Server Component is delivered through the streamed
+ * response as an *HTTP 200* carrying a client-side instruction, because the
+ * shell has already been flushed by the time the page's `await` resolves — so
+ * the browser still downloads a whole document and still needs JavaScript to
+ * reach the dashboard. Answering here costs one empty response and nothing
+ * else.
+ */
+const CUSTOMER_SESSION_EXCHANGE_PATH = "/api/customer/session/exchange";
+
 function isCustomerAuthPath(pathname: string) {
   return isUnder(pathname, CUSTOMER_AUTH_PREFIX);
 }
@@ -81,7 +98,9 @@ function isProtectedRoute(pathname: string) {
   if (isUnder(pathname, ADMIN_PREFIX)) return true;
   if (isUnder(pathname, STAFF_PREFIX)) return true;
   if (isUnder(pathname, "/customer/dashboard")) return true;
-  // The public booking form stays reachable without an account.
+  // The booking form itself stays reachable without an account: browsing the
+  // catalog and building an estimate is the part that is public. Sending the
+  // request needs one, and that is enforced where the booking is written.
   if (pathname.startsWith("/customer/bookings/") && !isUnder(pathname, "/customer/bookings/new")) return true;
   return false;
 }
@@ -95,30 +114,6 @@ function isPrivatePath(pathname: string) {
   if (pathname.startsWith("/customer/bookings/") && !isUnder(pathname, "/customer/bookings/new")) return true;
   if (pathname.startsWith("/api/")) return true;
   return false;
-}
-
-function configuredOrigin() {
-  const value = process.env.NEXT_PUBLIC_SITE_URL;
-  if (!value) return null;
-  try {
-    return new URL(value).origin;
-  } catch {
-    return null;
-  }
-}
-
-function isSameOrigin(request: NextRequest) {
-  const origin = request.headers.get("origin");
-  if (!origin) return process.env.NODE_ENV !== "production";
-  const allowed = new Set<string>([request.nextUrl.origin]);
-  const siteOrigin = configuredOrigin();
-  if (siteOrigin) allowed.add(siteOrigin);
-  const host = request.headers.get("host");
-  if (host) {
-    const protocol = request.headers.get("x-forwarded-proto")?.split(",")[0]?.trim() || request.nextUrl.protocol.replace(":", "");
-    allowed.add(`${protocol}://${host}`);
-  }
-  return allowed.has(origin);
 }
 
 function applyPrivateHeaders(response: NextResponse, pathname: string) {
@@ -137,15 +132,24 @@ function applyPrivateHeaders(response: NextResponse, pathname: string) {
 }
 
 function handleRequest(request: NextRequest) {
-  const { pathname, search } = request.nextUrl;
-  const siteOrigin = configuredOrigin();
+  const { pathname, search, searchParams } = request.nextUrl;
+  const siteOrigin = configuredSiteOrigin();
 
   // Customer registration moved to the sign-in provider, which verifies the
   // address (and, with Google, the identity) before an account exists. The old
   // path is aliased here rather than with a page so the redirect is a real 308
   // instead of a client-side refresh after a wasted render.
   if (pathname === LEGACY_REGISTER_PATH) {
-    return NextResponse.redirect(new URL(CUSTOMER_SIGN_UP_PATH, request.url), 308);
+    return redirectTo(CUSTOMER_SIGN_UP_PATH, request, 308);
+  }
+
+  // The happy path of the provider hand-off never renders this page. The
+  // exchange endpoint mints the cookie and redirects on to the workspace; the
+  // page is only reached when it refuses, carrying a code, and then it is the
+  // page's job to explain. Skipping the render is what makes the hand-off two
+  // redirects instead of two renders.
+  if (pathname === CUSTOMER_COMPLETE_PATH && !searchParams.has(EXCHANGE_REFUSAL_PARAM)) {
+    return applyPrivateHeaders(redirectTo(CUSTOMER_SESSION_EXCHANGE_PATH, request), pathname);
   }
 
   // Canonical host in production, so cookies and absolute links stay consistent.
@@ -169,17 +173,18 @@ function handleRequest(request: NextRequest) {
     if (!hasSession) {
       // A half-finished sign-in belongs on the code screen, not the login form.
       if (request.cookies.get(pendingTwoFactorCookieName(https))?.value ?? request.cookies.get(pendingTwoFactorCookieName(!https))?.value) {
-        const target = new URL("/verify-two-factor", request.url);
-        return NextResponse.redirect(target);
+        return redirectTo("/verify-two-factor", request);
       }
       // A blocked visitor is sent to the sign-in surface for their own area, so
       // a customer is never bounced to the staff password screen (which they
       // cannot use) and a staff member is never sent to the customer provider.
       const customerArea = pathname.startsWith("/customer/");
-      const signIn = new URL(customerArea ? `${CUSTOMER_AUTH_PREFIX}/sign-in` : "/sign-in", request.url);
+      const signIn = customerArea ? `${CUSTOMER_AUTH_PREFIX}/sign-in` : "/sign-in";
       const returnTo = `${pathname}${search}`;
-      if (returnTo && returnTo !== "/") signIn.searchParams.set("returnTo", returnTo);
-      return NextResponse.redirect(signIn);
+      const target = returnTo && returnTo !== "/"
+        ? `${signIn}?returnTo=${encodeURIComponent(returnTo)}`
+        : signIn;
+      return redirectTo(target, request);
     }
   }
 

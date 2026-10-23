@@ -24,7 +24,9 @@ import {
   canGrantRole,
   canModifyAccount,
   canRemoveAdmin,
+  canRemoveCustomer,
   isPasswordRequired,
+  isSignInlessCustomerRecord,
   canReviewRoleRequest,
   deriveAccessState,
   gatePathForState,
@@ -141,8 +143,88 @@ test("only a super admin may modify or grant super admin", () => {
 
   assert.ok(canGrantRole(RoleKey.ADMIN, RoleKey.SUPER_ADMIN));
   assert.equal(canGrantRole(RoleKey.SUPER_ADMIN, RoleKey.SUPER_ADMIN), null);
-  assert.equal(canGrantRole(RoleKey.ADMIN, RoleKey.ADMIN), null);
   assert.equal(canGrantRole(RoleKey.ADMIN, RoleKey.STAFF), null);
+});
+
+test("granting administrator access is a super admin decision", () => {
+  /*
+   * The role-change form is hidden from anybody who is not a super admin, but
+   * the action behind it was reachable by any admin. Every other path that
+   * hands out administrator access already requires a super admin — the
+   * access-request review, the direct invite, and the promotion action — so
+   * this one was the only way an ordinary admin could mint a peer.
+   */
+  assert.ok(canGrantRole(RoleKey.ADMIN, RoleKey.ADMIN));
+  assert.ok(canGrantRole(RoleKey.STAFF, RoleKey.ADMIN));
+  assert.ok(canGrantRole(RoleKey.CUSTOMER, RoleKey.ADMIN));
+  assert.equal(canGrantRole(RoleKey.SUPER_ADMIN, RoleKey.ADMIN), null);
+});
+
+test("a customer record with no login behind it is not an identity", () => {
+  /*
+   * The public booking form creates a customer record with no login so an
+   * enquiry has somewhere to attach. The second enquiry from the same address was
+   * then refused with "sign in with the account email" — advice that record can
+   * never follow, because it has no password and no provider identity. A customer
+   * who asked twice could not ask a third time, and the form is the only way they
+   * can reach the business.
+   *
+   * So that one kind of account is a *record* rather than an identity, and an
+   * anonymous enquiry may attach to it.
+   */
+  const noLogin = { role: RoleKey.CUSTOMER, mustSetPassword: false, passwordHash: null, clerkId: null };
+  assert.equal(isSignInlessCustomerRecord(noLogin), true);
+
+  // Anything with a sign-in behind it keeps the refusal, because that is an
+  // identity somebody can be locked out of.
+  assert.equal(isSignInlessCustomerRecord({ ...noLogin, passwordHash: "scrypt$..." }), false, "a self-registered customer must sign in");
+  assert.equal(isSignInlessCustomerRecord({ ...noLogin, clerkId: "user_abc" }), false, "a provider-owned customer signs in through the provider");
+  // Mid-activation and no hash is still no way in, so it is still a record — the
+  // advice would be just as impossible to follow. `mustSetPassword` outranks a
+  // hash by design (an invited team member must complete activation), so that
+  // flag keeps it a record; only the role check below keeps it off the exemption
+  // for a team account.
+  assert.equal(isSignInlessCustomerRecord({ ...noLogin, mustSetPassword: true }), true);
+  assert.equal(isSignInlessCustomerRecord({ ...noLogin, mustSetPassword: true, passwordHash: "scrypt$...", role: RoleKey.STAFF }), false);
+
+  // A team account is never a customer record, at any sign-in state. This is the
+  // privilege boundary the booking form must not cross: an enquiry must never be
+  // able to turn an administrator into a customer.
+  for (const role of [RoleKey.ADMIN, RoleKey.SUPER_ADMIN, RoleKey.STAFF]) {
+    assert.equal(isSignInlessCustomerRecord({ ...noLogin, role }), false, `${role} must never be treated as a customer record`);
+    assert.equal(isSignInlessCustomerRecord({ ...noLogin, role, passwordHash: "scrypt$..." }), false, `${role} must never be treated as a customer record`);
+  }
+});
+
+test("the booking form refuses an anonymous claim on anything but a sign-inless record", () => {
+  // The guard itself, in `getOrCreatePublicCustomer`. Read from the source because
+  // the function writes to the database and cannot be called from a test.
+  const source = readFileSync("lib/bookings.ts", "utf8");
+  assert.match(source, /if \(!payload\.userId && !isSignInlessCustomerRecord\(/, "the anonymous path must consult the shared rule");
+  /*
+   * Order matters inside that block, and it is the point of the change: a team
+   * account must be told it is reserved, *not* that it should sign in. Pointing
+   * somebody with an administrator address at a customer sign-in is advice that
+   * cannot work — the provider will never federate their address — so the
+   * role-specific refusal has to come first.
+   *
+   * Comments stripped first: this file explains the ordering at length, and
+   * matching the prose would fail on its own rationale.
+   */
+  const code = source
+    .split("\n")
+    .filter((line) => !line.trimStart().startsWith("//"))
+    .join("\n");
+  assert.match(
+    code,
+    /!isSignInlessCustomerRecord\([\s\S]{0,260}reserved for an administrator account[\s\S]{0,260}Sign in with the account email/,
+    "the team-account refusal must be decided before the sign-in advice",
+  );
+
+  // And the exemption is the *only* thing that changed: the by-email branch
+  // still reuses the profile it finds rather than creating a second one.
+  assert.match(source, /const updated = await client\.user\.update\(/);
+  assert.match(source, /if \(updated\.customerProfile\) return updated\.customerProfile\.id;/);
 });
 
 test("a provider-owned customer is never asked to set a password", () => {
@@ -231,6 +313,55 @@ test("a super admin cannot be removed, and the last one definitely cannot", () =
   const last = canRemoveAdmin({ reviewer: superAdmin, target: otherSuper, activeSuperAdmins: 1 }) ?? "";
   assert.match(last, /only active super admin/i);
   assert.match(last, /promote another/i);
+});
+
+test("removing a customer is super-admin-only, and never a team member", () => {
+  const superAdmin = { id: "s1", role: RoleKey.SUPER_ADMIN };
+  const customer = { id: "c9", role: RoleKey.CUSTOMER };
+
+  // Erasure is permanent, so it is kept behind the same role that owns the
+  // security log. An admin who may suspend gets no erasure.
+  assert.match(canRemoveCustomer({ reviewer: { id: "a1", role: RoleKey.ADMIN }, target: customer }) ?? "", /only a super admin/i);
+  assert.match(canRemoveCustomer({ reviewer: { id: "st1", role: RoleKey.STAFF }, target: customer }) ?? "", /only a super admin/i);
+  assert.match(canRemoveCustomer({ reviewer: customer, target: customer }) ?? "", /only a super admin/i);
+
+  // Refused even for the one customer that does hold the role.
+  assert.match(canRemoveCustomer({ reviewer: superAdmin, target: superAdmin }) ?? "", /your own account/i);
+
+  // A demoted team member still carries a `Customer` row. Removing them here
+  // would erase their details without recording the role change that made them
+  // reachable in this directory in the first place.
+  for (const role of [RoleKey.ADMIN, RoleKey.SUPER_ADMIN, RoleKey.STAFF]) {
+    assert.match(
+      canRemoveCustomer({ reviewer: superAdmin, target: { id: "t1", role } }) ?? "",
+      /access control/i,
+      `a ${role} account must be removed through the access-control screen`,
+    );
+  }
+
+  assert.equal(canRemoveCustomer({ reviewer: superAdmin, target: customer }), null);
+});
+
+test("removing a customer never deletes anything they booked", () => {
+  // `Booking.customerId` cascades on delete, so a naive implementation would
+  // quietly take every payment, invoice, and inventory reservation with it. The
+  // erasure is an overwrite of identifying fields, not a row removal, so this is
+  // asserted against the source: "we stopped deleting" is not something a type
+  // checker can catch.
+  const source = readFileSync("lib/access-management.ts", "utf8");
+  const erasure = source.slice(source.indexOf("export async function removeCustomerAccess"));
+  assert.ok(erasure.length > 0, "removeCustomerAccess must exist");
+
+  for (const deleted of ["tx.user.delete", "tx.customer.delete", "tx.booking.delete"]) {
+    assert.doesNotMatch(erasure, new RegExp(deleted.replace(".", "\\.")), `removeCustomerAccess must not call ${deleted}`);
+  }
+  // The identifying fields are overwritten, and the placeholder address is the
+  // same one `prisma/reset-auth.ts` uses so a re-registration cannot inherit
+  // this row.
+  assert.match(source, /ERASED_EMAIL_DOMAIN = "@removed\.invalid"/);
+  assert.match(erasure, /removed\+\$\{target\.user\.id\}/);
+  // Sessions are revoked, not merely left to expire.
+  assert.match(erasure, /revokeAllSessions\(result\.userId/);
 });
 
 test("an email is never auto-merged into an existing identity", () => {
@@ -439,16 +570,16 @@ test("the customer provider area only exists where it is meant to", () => {
   // "the route is not a catch-all route". `[[...rest]]` also still matches the
   // bare path, so nothing that links to `/customer/auth/sign-in` breaks.
   for (const expected of [
-    "app/(customer)/customer/auth/sign-in/[[...rest]]",
-    "app/(customer)/customer/auth/sign-up/[[...rest]]",
-    "app/(customer)/customer/auth/complete",
+    "app/(customer-auth)/customer/auth/sign-in/[[...rest]]",
+    "app/(customer-auth)/customer/auth/sign-up/[[...rest]]",
+    "app/(customer-auth)/customer/auth/complete",
   ]) {
     assert.equal(existsSync(`${expected}/page.tsx`), true, `${expected} is missing`);
   }
   // The bare, non-catch-all mount is the bug that was fixed; it must not return.
   for (const forbidden of [
-    "app/(customer)/customer/auth/sign-in/page.tsx",
-    "app/(customer)/customer/auth/sign-up/page.tsx",
+    "app/(customer-auth)/customer/auth/sign-in/page.tsx",
+    "app/(customer-auth)/customer/auth/sign-up/page.tsx",
   ]) {
     assert.equal(existsSync(forbidden), false, `${forbidden} must be a catch-all route`);
   }

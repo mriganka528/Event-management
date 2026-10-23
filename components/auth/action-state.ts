@@ -27,6 +27,40 @@ export type AuthActionState = {
   /** Nonce tying a submitted code to the half-finished sign-in. */
   maskedDestination?: string;
   fieldErrors?: Record<string, string>;
+  /**
+   * What the applicant actually submitted, echoed back by
+   * `submitAccessRequestAction`.
+   *
+   * "Your request has been sent" told the applicant nothing they could check.
+   * Someone who asked to join as a driver had no way to confirm they had said
+   * driver rather than decorator, so they either chased a super admin to ask or
+   * simply reapplied.
+   */
+  request?: AccessRequestSummary;
+  /**
+   * The request that was already on file, attached to a duplicate refusal.
+   *
+   * Without it the applicant is told "you already have a request awaiting
+   * review" and shown nothing about it — the same dead end as a confirmation
+   * with no details, which is exactly what they need to see in order to know
+   * they do not have to apply again.
+   */
+  previousRequest?: AccessRequestSummary;
+};
+
+export type AccessRequestSummary = {
+  fullName: string;
+  email: string;
+  phone: string | null;
+  requestedRole: string;
+  requestedStaffType: string | null;
+  note: string | null;
+  /** Short, non-sensitive handle they can quote to a super admin. */
+  reference: string;
+  createdAt: string;
+  /** `PENDING`, `APPROVED`, or `REJECTED`, when known. */
+  status: string | null;
+  reviewedAt: string | null;
 };
 
 export const IDLE_AUTH_STATE: AuthActionState = { status: "idle" };

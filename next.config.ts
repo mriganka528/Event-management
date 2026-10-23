@@ -40,6 +40,25 @@ const nextConfig: NextConfig = {
   poweredByHeader: false,
   reactStrictMode: true,
   compress: true,
+  experimental: {
+    /*
+     * Static generation is bounded on purpose.
+     *
+     * Every worker is its own process with its own Prisma client, and each
+     * client holds a five-connection pool (`lib/prisma.ts`). On a twelve-core
+     * machine that is eleven workers opening fifty-five connections against
+     * Neon at once, which overruns the pooler and fails the build with:
+     *
+     *   Timed out fetching a new connection from the connection pool.
+     *   (Current connection pool timeout: 10, connection limit: 5)
+     *
+     * The prerendered pages are a handful of marketing pages, so the build is
+     * not the place to spend twelve cores. Two workers keep the connection
+     * count inside what the database hands out, and the build still finishes
+     * in a fraction of the time.
+     */
+    cpus: 2,
+  },
   images: {
     remotePatterns: [{ protocol: "https", hostname: "res.cloudinary.com" }],
     formats: ["image/avif", "image/webp"],
@@ -69,6 +88,8 @@ const nextConfig: NextConfig = {
       { source: "/staff/:path*", headers: privateHeaders },
       { source: "/customer/dashboard", headers: privateHeaders },
       { source: "/customer/dashboard/:path*", headers: privateHeaders },
+      { source: "/customer/bookings/:path*", headers: privateHeaders },
+      { source: "/customer/invoices/:path*", headers: privateHeaders },
       { source: "/customer/auth", headers: privateHeaders },
       { source: "/customer/auth/:path*", headers: privateHeaders },
       { source: "/customer/access", headers: privateHeaders },

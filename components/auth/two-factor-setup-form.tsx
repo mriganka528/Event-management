@@ -79,9 +79,9 @@ export function TwoFactorSetupForm({ phoneAvailable, defaultPhone }: { phoneAvai
 
               <AuthFeedback state={startState} />
 
-              <Button type="submit" disabled={starting}>
-                {starting ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <ShieldCheck className="mr-2 h-4 w-4" />}
-                Send my code
+              <Button type="submit" disabled={starting} aria-busy={starting || undefined}>
+                {starting ? <Loader2 className="mr-2 h-4 w-4 animate-spin" aria-hidden="true" /> : <ShieldCheck className="mr-2 h-4 w-4" aria-hidden="true" />}
+                {starting ? "Sending your code…" : "Send my code"}
               </Button>
             </form>
           </CardContent>
@@ -119,9 +119,9 @@ export function TwoFactorSetupForm({ phoneAvailable, defaultPhone }: { phoneAvai
               <AuthFeedback state={confirmState} />
               <AuthFeedback state={startState} tone="info" />
 
-              <Button type="submit" disabled={confirming || code.length !== 6}>
-                {confirming ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <ArrowRight className="mr-2 h-4 w-4" />}
-                Turn on two-factor and continue
+              <Button type="submit" disabled={confirming || code.length !== 6} aria-busy={confirming || undefined}>
+                {confirming ? <Loader2 className="mr-2 h-4 w-4 animate-spin" aria-hidden="true" /> : <ArrowRight className="mr-2 h-4 w-4" aria-hidden="true" />}
+                {confirming ? "Turning on two-factor…" : "Turn on two-factor and continue"}
               </Button>
             </form>
 

@@ -1,13 +1,14 @@
 import { NextResponse } from "next/server";
 import { ZodError } from "zod";
 import { createBookingForPublicCustomer, getBookingFormData } from "@/lib/bookings";
+import { customerFacingBookingMessage } from "@/lib/public-booking-error";
 import { rateLimitApi, readJsonBody, rejectCrossSiteMutation, rejectOversizedBody, withNoStore, InvalidJsonError, RequestBodyTooLargeError } from "@/lib/security";
 
 export async function GET(request: Request) {
   const limited = rateLimitApi(request, "catalog", { limit: 60, windowMs: 60_000 });
   if (limited) return limited;
   try {
-    const { services, packages } = await getBookingFormData();
+    const { services, packages, capacity } = await getBookingFormData();
     return withNoStore(NextResponse.json({
       services: services.map((service) => ({
         id: service.id,
@@ -16,6 +17,7 @@ export async function GET(request: Request) {
         basePrice: Number(service.basePrice),
         unitLabel: service.unitLabel,
         pricingMode: service.pricingMode,
+        inventoryCategories: service.inventoryCategories,
       })),
       packages: packages.map((item) => ({
         id: item.id,
@@ -25,9 +27,12 @@ export async function GET(request: Request) {
         price: Number(item.price),
         imageUrl: item.imageUrl,
       })),
+      // The same per-category availability the booking form uses, so an API
+      // client cannot build a quote the server is going to refuse.
+      capacity,
     }));
   } catch {
-    return withNoStore(NextResponse.json({ services: [], packages: [] }));
+    return withNoStore(NextResponse.json({ services: [], packages: [], capacity: {} }));
   }
 }
 
@@ -59,10 +64,13 @@ export async function POST(request: Request) {
   } catch (error) {
     if (error instanceof RequestBodyTooLargeError) return withNoStore(NextResponse.json({ error: "Request body is too large." }, { status: 413 }));
     if (error instanceof InvalidJsonError) return withNoStore(NextResponse.json({ error: "Invalid JSON body." }, { status: 400 }));
-    const message = error instanceof Error ? error.message : "Unable to create booking.";
     if (error instanceof ZodError) return withNoStore(NextResponse.json({ error: "Please check the required booking fields and try again." }, { status: 400 }));
-    const safeMessage = ["Event date must", "One or more selected services", "The selected package", "Choose a package", "Please enter", "valid date", "guest", "location", "incoming"].some((fragment) => message.toLowerCase().includes(fragment.toLowerCase())) ? message : "We could not create the booking right now. Please try again.";
-    const status = safeMessage === message ? 400 : 500;
-    return withNoStore(NextResponse.json({ error: safeMessage }, { status }));
+    // The same list the form's action uses, so a failure reads identically
+    // whether it arrived through the page or the API. See
+    // `lib/public-booking-error.ts` for what drifts when the two copies differ.
+    const safeMessage = customerFacingBookingMessage(error);
+    if (safeMessage) return withNoStore(NextResponse.json({ error: safeMessage }, { status: 400 }));
+    console.error("[booking] api request failed", error);
+    return withNoStore(NextResponse.json({ error: "We could not create the booking right now. Please try again." }, { status: 500 }));
   }
 }

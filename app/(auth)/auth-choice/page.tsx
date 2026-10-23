@@ -108,7 +108,9 @@ export default async function AuthChoicePage({ searchParams }: { searchParams: P
 
         <div className="flex flex-wrap items-center justify-center gap-3">
           <Link href="/customer/bookings/new">
-            <Button variant="ghost" size="sm">Book an event without an account</Button>
+            {/* The form itself is public to look at — the catalog and the estimate
+                are the sales pitch. Only sending the request needs an account. */}
+            <Button variant="ghost" size="sm">Browse and book an event</Button>
           </Link>
           <Link href="/">
             <Button variant="ghost" size="sm">Back to home</Button>

@@ -1,8 +1,6 @@
 "use client";
 
-import { LogOut } from "lucide-react";
-import { signOutAction } from "@/lib/auth-actions";
-import { Button } from "@/components/ui/button";
+import { SignOutForm } from "@/components/auth/sign-out-form";
 
 /**
  * Presentational account chip.
@@ -24,37 +22,27 @@ export function AccountMenu({ name, roleLabel, compact = false }: { name: string
     return (
       <div className="flex items-center gap-2">
         <span
-          className="flex h-9 w-9 items-center justify-center rounded-full bg-[var(--brand-soft)] text-sm font-semibold text-[var(--brand-dark)]"
+          className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-[var(--brand-soft)] text-sm font-semibold text-[var(--brand-dark)]"
           title={`${name} (${roleLabel})`}
           aria-hidden
         >
           {initial}
         </span>
-        <form action={signOutAction}>
-          <Button type="submit" variant="outline" size="sm">
-            <LogOut className="mr-2 h-4 w-4" />
-            Sign out
-          </Button>
-        </form>
+        <SignOutForm />
       </div>
     );
   }
 
   return (
     <div className="flex items-center gap-3">
-      <span className="flex h-9 w-9 items-center justify-center rounded-full bg-[var(--brand-soft)] text-sm font-semibold text-[var(--brand-dark)]" aria-hidden>
+      <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-[var(--brand-soft)] text-sm font-semibold text-[var(--brand-dark)]" aria-hidden>
         {initial}
       </span>
       <span className="hidden min-w-0 sm:block">
         <span className="block truncate text-sm font-medium text-[var(--foreground)]">{name}</span>
         <span className="block truncate text-xs capitalize text-[var(--muted)]">{roleLabel}</span>
       </span>
-      <form action={signOutAction}>
-        <Button type="submit" variant="outline" size="sm">
-          <LogOut className="mr-2 h-4 w-4" />
-          Sign out
-        </Button>
-      </form>
+      <SignOutForm />
     </div>
   );
 }

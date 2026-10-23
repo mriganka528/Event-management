@@ -3,35 +3,52 @@
 import { Moon, Sun } from "lucide-react";
 import { usePathname } from "next/navigation";
 import { useCallback, useEffect, useState, useSyncExternalStore } from "react";
-import { isTheme, themeAreaForPath, themeStorageKey, type Theme } from "@/lib/theme-scope";
+import {
+  DEFAULT_THEME,
+  applyDocumentTheme,
+  resolveTheme,
+  themeAreaForPath,
+  themeStorageKey,
+  type Theme,
+  type ThemeArea,
+} from "@/lib/theme-scope";
 
 const emptySubscribe = () => () => undefined;
 
-function readStoredTheme(area: Parameters<typeof themeStorageKey>[0]): Theme {
-  if (typeof window === "undefined") return "light";
+/**
+ * The theme stored for this area, falling back to the default.
+ *
+ * Deliberately never consults `prefers-color-scheme`. An unset preference used to
+ * follow the operating system here and in the pre-paint bootstrap, which meant a
+ * person on a dark-mode device was shown dark with no sign of who had chosen it
+ * and no obvious way back. The default is light for everyone.
+ */
+function readStoredTheme(area: ThemeArea): Theme {
+  if (typeof window === "undefined") return DEFAULT_THEME;
   try {
-    const saved = window.localStorage.getItem(themeStorageKey(area));
-    if (isTheme(saved)) return saved;
-    // First visit to this area: follow the operating system, exactly as the
-    // pre-paint bootstrap does, so the button never disagrees with the page.
-    return window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
+    const { theme, migratedFrom } = resolveTheme(area, (key) => window.localStorage.getItem(key));
+    // A value found under a retired key is folded into the current one, so the
+    // migration happens once rather than on every visit.
+    if (migratedFrom) window.localStorage.setItem(themeStorageKey(area), theme);
+    return theme;
   } catch {
-    return "light";
+    return DEFAULT_THEME;
   }
 }
 
 /**
  * Theme switch, scoped to the area the visitor is currently in.
  *
- * Writes `theme:<area>`, so the customer area, the staff area, the admin panel,
- * and the public site each keep their own preference. Reading it back is keyed
- * on the pathname, so navigating from one area to another shows that area's
- * stored choice rather than the one just clicked.
+ * Writes `theme:<area>`, so the customer journey — marketing pages, sign-in
+ * panels, dashboard, booking form — and the admin and staff workspaces each keep
+ * their own preference. Reading it back is keyed on the pathname, so navigating
+ * from one area to the other shows that area's stored choice rather than the one
+ * just clicked.
  */
 export function ThemeToggle() {
   const pathname = usePathname();
   const area = themeAreaForPath(pathname);
-  const [theme, setTheme] = useState<Theme>("light");
+  const [theme, setTheme] = useState<Theme>(DEFAULT_THEME);
   const mounted = useSyncExternalStore(emptySubscribe, () => true, () => false);
 
   // Re-read whenever the area changes. Declared after the `useState` initialiser
@@ -45,7 +62,7 @@ export function ThemeToggle() {
   // rather than waiting for the next render.
   useEffect(() => {
     if (!mounted) return;
-    document.documentElement.dataset.theme = theme;
+    applyDocumentTheme(document, theme);
   }, [mounted, theme, area]);
 
   const toggle = useCallback(() => {
@@ -60,7 +77,7 @@ export function ThemeToggle() {
     });
   }, [area]);
 
-  const visibleTheme = mounted ? theme : "light";
+  const visibleTheme = mounted ? theme : DEFAULT_THEME;
   const label = visibleTheme === "light" ? "Dark" : "Light";
 
   return (

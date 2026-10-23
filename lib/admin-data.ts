@@ -1,6 +1,8 @@
-import { AccountStatus, BookingStatus, NotificationAudience, RoleKey, type SecurityEventType } from "@prisma/client";
+import { AccountStatus, BookingStatus, NotificationAudience, RoleKey, StaffStatus, type SecurityEventType } from "@prisma/client";
 import { prisma } from "@/lib/prisma";
+import { CUSTOMER_USER_FIELDS } from "@/lib/user-fields";
 import { requireAdmin, requireSuperAdmin } from "@/lib/rbac";
+import { ERASED_EMAIL_DOMAIN } from "@/lib/access-management";
 
 /** The roles the access-control screen is about. */
 const ADMIN_ROLE_KEYS = [RoleKey.SUPER_ADMIN, RoleKey.ADMIN];
@@ -34,13 +36,13 @@ export async function getAdminDashboardData() {
       prisma.payment.aggregate({ _sum: { amount: true }, where: { status: "CAPTURED", paidAt: { gte: monthStart } } }),
       prisma.booking.findMany({
         where: { eventDate: { gte: now }, status: { in: [BookingStatus.APPROVED, BookingStatus.PREPARING] } },
-        include: { customer: { include: { user: true } }, package: true },
+        include: { customer: { include: { user: { select: CUSTOMER_USER_FIELDS } } }, package: true },
         orderBy: { eventDate: "asc" },
         take: 6,
       }),
       prisma.booking.findMany({
         where: { status: BookingStatus.PENDING },
-        include: { customer: { include: { user: true } }, package: true },
+        include: { customer: { include: { user: { select: CUSTOMER_USER_FIELDS } } }, package: true },
         orderBy: { createdAt: "desc" },
         take: 5,
       }),
@@ -126,7 +128,31 @@ export async function getAdminStaff() {
   await requireAdmin();
   try {
     return await prisma.staff.findMany({
-      include: { user: true, managedBy: { include: { user: true } }, assignments: { include: { booking: { include: { customer: { include: { user: true } } } } } } },
+      include: { user: { select: CUSTOMER_USER_FIELDS }, managedBy: { include: { user: { select: CUSTOMER_USER_FIELDS } } }, assignments: { include: { booking: { include: { customer: { include: { user: { select: CUSTOMER_USER_FIELDS } } } } } } } },
+      orderBy: { createdAt: "desc" },
+    });
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * The staff members that can be put on a booking.
+ *
+ * Only the members who are available and active are offered: a suspended or
+ * never-activated member cannot be assigned work, and offering them would let
+ * a booking be assigned to somebody who will never see it.
+ *
+ * Deliberately narrow. The staff screen needs the whole record, with every
+ * assignment it has ever had; this one is for a dropdown on a single booking,
+ * and pulling the assignments along for it would be a round trip per booking.
+ */
+export async function getStaffOptions() {
+  await requireAdmin();
+  try {
+    return await prisma.staff.findMany({
+      where: { isAvailable: true, status: StaffStatus.ACTIVE },
+      select: { id: true, staffType: true, isAvailable: true, user: { select: { firstName: true, lastName: true } } },
       orderBy: { createdAt: "desc" },
     });
   } catch {
@@ -137,10 +163,16 @@ export async function getAdminStaff() {
 export async function getAdminCustomers() {
   await requireAdmin();
   try {
-    return await prisma.customer.findMany({
-      include: { user: true, bookings: { orderBy: { createdAt: "desc" }, select: { id: true, status: true, eventType: true, totalAmount: true, eventDate: true } } },
+    const customers = await prisma.customer.findMany({
+      include: { user: { select: CUSTOMER_USER_FIELDS }, bookings: { orderBy: { createdAt: "desc" }, select: { id: true, status: true, eventType: true, totalAmount: true, eventDate: true } } },
       orderBy: { createdAt: "desc" },
     });
+    // A customer whose details were erased keeps their bookings — the history
+    // stays and still counts towards revenue — but nothing about them does. The
+    // placeholder address is what identifies the row, so the flag is derived
+    // rather than stored: a record cannot be erased twice and end up with two
+    // different answers.
+    return customers.map((customer) => ({ ...customer, isErased: customer.user.email.endsWith(ERASED_EMAIL_DOMAIN) }));
   } catch {
     return [];
   }
@@ -151,7 +183,7 @@ export async function getAdminPayments() {
   try {
     return await prisma.payment.findMany({
       where: { status: "CAPTURED" },
-      include: { booking: { include: { customer: { include: { user: true } }, event: true } } },
+      include: { booking: { include: { customer: { include: { user: { select: CUSTOMER_USER_FIELDS } } }, event: true } } },
       orderBy: { paidAt: "desc" },
     });
   } catch {
@@ -163,7 +195,7 @@ export async function getAdminPaymentOrders() {
   await requireAdmin();
   try {
     return await prisma.paymentOrder.findMany({
-      include: { booking: { include: { customer: { include: { user: true } } } } },
+      include: { booking: { include: { customer: { include: { user: { select: CUSTOMER_USER_FIELDS } } } } } },
       orderBy: { createdAt: "desc" },
       take: 50,
     });
@@ -176,8 +208,44 @@ export async function getAdminInvoices() {
   await requireAdmin();
   try {
     return await prisma.invoice.findMany({
-      include: { booking: { include: { customer: { include: { user: true } }, event: true } } },
+      include: { booking: { select: { eventType: true, location: true, customer: { select: { user: { select: { firstName: true, lastName: true, email: true } } } } } } },
       orderBy: { issuedAt: "desc" },
+      relationLoadStrategy: "join",
+    });
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * The bookings an invoice can still be raised for.
+ *
+ * A booking needs an invoice once it has been approved, so those are the ones
+ * offered. A booking that already has one is not offered again, because the
+ * screen is for issuing a *first* invoice rather than editing an existing one.
+ */
+export async function getInvoiceableBookings() {
+  await requireAdmin();
+  try {
+    return await prisma.booking.findMany({
+      where: { invoice: null, status: { notIn: [BookingStatus.PENDING, BookingStatus.CANCELLED, BookingStatus.REJECTED] } },
+      select: { id: true, totalAmount: true, customer: { select: { user: { select: { firstName: true, lastName: true } } } } },
+      orderBy: { eventDate: "asc" },
+      take: 100,
+      relationLoadStrategy: "join",
+    });
+  } catch {
+    return [];
+  }
+}
+
+export async function getPendingCashPayments() {
+  await requireAdmin();
+  try {
+    return await prisma.payment.findMany({
+      where: { status: "PENDING", method: "CASH" },
+      include: { booking: { select: { id: true, location: true, balanceAmount: true, customer: { select: { user: { select: { firstName: true, lastName: true } } } } } } },
+      orderBy: { createdAt: "asc" },
     });
   } catch {
     return [];
@@ -188,7 +256,7 @@ export async function getAdminEvents() {
   await requireAdmin();
   try {
     return await prisma.event.findMany({
-      include: { booking: { include: { customer: { include: { user: true } } } } },
+      include: { booking: { include: { customer: { include: { user: { select: CUSTOMER_USER_FIELDS } } } } } },
       orderBy: { startDate: "asc" },
     });
   } catch {
@@ -201,7 +269,7 @@ export async function getAdminNotifications(userId: string) {
   try {
     return await prisma.notification.findMany({
       where: { audience: NotificationAudience.ADMIN, userId },
-      include: { user: true },
+      include: { user: { select: CUSTOMER_USER_FIELDS } },
       orderBy: { createdAt: "desc" },
       take: 100,
     });

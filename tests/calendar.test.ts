@@ -7,21 +7,41 @@ import {
   isCalendarFilter,
   isSameDay,
   isWeekend,
+  istDayOfMonth,
+  istParts,
   monthKey,
   parseDayKey,
   parseMonthKey,
   statusLabel,
   statusTone,
 } from "@/lib/calendar";
+import { utcFromIstDayKey } from "@/lib/ist";
+
+/**
+ * The operations calendar.
+ *
+ * Every date here is read in IST, not in the host's timezone. The tests
+ * therefore build their dates from an IST day key rather than with
+ * `new Date(year, month, day)`, which would anchor them to whatever timezone
+ * the machine running the tests happens to be in — and the calendar would be
+ * right on one machine and a day out on the next.
+ */
+
+/** An IST calendar day, as the application builds them. */
+function istDay(year: number, month: number, day: number) {
+  const date = utcFromIstDayKey(`${year}-${String(month + 1).padStart(2, "0")}-${String(day).padStart(2, "0")}`);
+  assert.ok(date, `could not build ${year}-${month + 1}-${day}`);
+  return date;
+}
 
 test("month and day keys are zero padded", () => {
-  assert.equal(dayKey(new Date(2026, 8, 26)), "2026-09-26");
-  assert.equal(monthKey(new Date(2026, 0, 5)), "2026-01");
-  assert.equal(monthKey(new Date(2026, 11, 31)), "2026-12");
+  assert.equal(dayKey(istDay(2026, 8, 26)), "2026-09-26");
+  assert.equal(monthKey(istDay(2026, 0, 5)), "2026-01");
+  assert.equal(monthKey(istDay(2026, 11, 31)), "2026-12");
 });
 
 test("month key parsing rejects malformed or out-of-range input", () => {
-  const fallback = new Date(2026, 8, 26);
+  const fallback = istDay(2026, 8, 26);
   assert.equal(monthKey(parseMonthKey("2026-09", fallback)), "2026-09");
   assert.equal(monthKey(parseMonthKey("2026-13", fallback)), monthKey(fallback));
   assert.equal(monthKey(parseMonthKey("2026-00", fallback)), monthKey(fallback));
@@ -35,14 +55,16 @@ test("day key parsing rejects rollover dates", () => {
   assert.equal(parseDayKey("2026-13-01"), null);
   const parsed = parseDayKey("2026-09-26");
   assert.ok(parsed);
-  assert.equal(parsed.getMonth(), 8);
-  assert.equal(parsed.getDate(), 26);
+  // Read in IST, so the day is the one that was asked for.
+  const parts = istParts(parsed);
+  assert.equal(parts.month, 8);
+  assert.equal(parts.day, 26);
 });
 
 test("addMonths crosses year boundaries and always lands on the 1st", () => {
-  assert.equal(monthKey(addMonths(new Date(2026, 0, 15), -1)), "2025-12");
-  assert.equal(monthKey(addMonths(new Date(2026, 11, 15), 1)), "2027-01");
-  assert.equal(addMonths(new Date(2026, 5, 20), 1).getDate(), 1);
+  assert.equal(monthKey(addMonths(istDay(2026, 0, 15), -1)), "2025-12");
+  assert.equal(monthKey(addMonths(istDay(2026, 11, 15), 1)), "2027-01");
+  assert.equal(istDayOfMonth(addMonths(istDay(2026, 5, 20), 1)), 1);
 });
 
 test("month grid always has unique, consecutive day keys", () => {
@@ -81,12 +103,12 @@ test("august 2026 grid does not duplicate the first of the month", () => {
 
 test("leading and trailing cells belong to the adjacent months", () => {
   const grid = buildMonthGrid(2026, 7);
-  const leading = grid.filter((cell) => !cell.inMonth && cell.date.getMonth() === 6);
-  const trailing = grid.filter((cell) => !cell.inMonth && cell.date.getMonth() === 8);
+  const leading = grid.filter((cell) => !cell.inMonth && istParts(cell.date).month === 6);
+  const trailing = grid.filter((cell) => !cell.inMonth && istParts(cell.date).month === 8);
   assert.ok(leading.length > 0);
   assert.ok(trailing.length > 0);
-  assert.equal(leading.at(-1)!.date.getDate(), 31); // Jul 31
-  assert.equal(trailing[0].date.getDate(), 1); // Sep 1
+  assert.equal(istDayOfMonth(leading.at(-1)!.date), 31); // Jul 31
+  assert.equal(istDayOfMonth(trailing[0].date), 1); // Sep 1
 });
 
 test("month grid always covers whole weeks and marks leading/trailing days", () => {
@@ -130,19 +152,20 @@ test("every cell key is unique across four decades (duplicate-key regression)", 
       }
 
       // Exactly the in-month cells are flagged as such.
-      assert.equal(grid.filter((cell) => cell.inMonth).length, new Date(year, month + 1, 0).getDate());
+      const daysInMonth = new Date(Date.UTC(year, month + 1, 0)).getUTCDate();
+      assert.equal(grid.filter((cell) => cell.inMonth).length, daysInMonth);
     }
   }
 });
 
 test("isSameDay and isWeekend behave safely with nulls", () => {
-  const today = new Date(2026, 8, 26);
-  assert.equal(isSameDay(today, new Date(2026, 8, 26)), true);
-  assert.equal(isSameDay(today, new Date(2026, 8, 27)), false);
+  const today = istDay(2026, 8, 26);
+  assert.equal(isSameDay(today, istDay(2026, 8, 26)), true);
+  assert.equal(isSameDay(today, istDay(2026, 8, 27)), false);
   assert.equal(isSameDay(null, today), false);
   assert.equal(isSameDay(today, null), false);
-  assert.equal(isWeekend(new Date(2026, 8, 26)), true); // Saturday
-  assert.equal(isWeekend(new Date(2026, 8, 28)), false); // Monday
+  assert.equal(isWeekend(istDay(2026, 8, 26)), true); // Saturday
+  assert.equal(isWeekend(istDay(2026, 8, 28)), false); // Monday
 });
 
 test("status filter only accepts known values", () => {

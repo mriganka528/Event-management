@@ -1,18 +1,131 @@
 import "dotenv/config";
 
 import { createServer } from "node:http";
+import { createServer as createNetServer } from "node:net";
 import { createHash } from "node:crypto";
 import next from "next";
 import { Server as SocketIOServer } from "socket.io";
 import { PrismaClient, RoleKey, AccountStatus } from "@prisma/client";
 
+import { pooledDatabaseUrl } from "./lib/prisma-pool.mjs";
+
 const dev = process.env.NODE_ENV !== "production" && !process.argv.includes("--production");
 if (!process.env.NODE_ENV) process.env.NODE_ENV = dev ? "development" : "production";
 const hostname = process.env.HOST ?? "0.0.0.0";
-const port = Number(process.env.PORT ?? 3000);
+
+/**
+ * How many ports to try before giving up. Next's own dev server uses the same
+ * bound, so a conflict that outlasts it is not going to clear itself.
+ */
+const MAX_PORT_ATTEMPTS = 10;
+
+/**
+ * Whether a port can be bound right now.
+ *
+ * Opens and immediately closes a socket. Racy in principle — something else
+ * could take the port between the check and the real bind — which is why
+ * `listenOnAvailablePort` still handles `EADDRINUSE` as it happens rather than
+ * trusting this answer.
+ */
+function isPortAvailable(candidate) {
+  return new Promise((resolve) => {
+    const probe = createNetServer();
+    probe.once("error", () => resolve(false));
+    probe.once("listening", () => probe.close(() => resolve(true)));
+    probe.listen(candidate, hostname);
+  });
+}
+
+/**
+ * Bind `httpServer`, walking up the port range when the one asked for is taken.
+ *
+ * Next's dev server does this itself, but only when it owns the socket — its
+ * `allowRetry` lives in the code path where Next creates the server. This file
+ * creates its own, so that retry never runs and a busy port is a hard crash
+ * instead of a delay.
+ *
+ * Only in development. In production the port is not ours to choose: it is what
+ * a reverse proxy, a load balancer or a platform expects to reach the app on, and
+ * quietly listening somewhere else turns a clear "port in use" error into a
+ * service nobody can reach.
+ *
+ * Resolves with the port actually bound, so the caller can report it rather than
+ * the one that was asked for.
+ */
+function listenOnAvailablePort(httpServer, preferred) {
+  return new Promise((resolve, reject) => {
+    let attempt = 0;
+    const onError = (error) => {
+      // `EACCES` means the port is reserved rather than occupied; moving up is
+      // still the right response, since the range above it is usually free.
+      if ((error.code === "EADDRINUSE" || error.code === "EACCES") && attempt < MAX_PORT_ATTEMPTS - 1) {
+        attempt += 1;
+        httpServer.listen(preferred + attempt, hostname);
+        return;
+      }
+      httpServer.off("error", onError);
+      reject(error);
+    };
+
+    httpServer.on("error", onError);
+    httpServer.once("listening", () => {
+      httpServer.off("error", onError);
+      const address = httpServer.address();
+      resolve(typeof address === "object" && address ? address.port : preferred + attempt);
+    });
+    httpServer.listen(preferred, hostname);
+  });
+}
+
+/**
+ * Pick a port before anything binds, so Next is told the same one the app will
+ * listen on.
+ *
+ * `next()` takes the port up front and uses it for its own bookkeeping, so
+ * finding the port afterwards would leave the two disagreeing.
+ */
+async function resolvePort(preferred) {
+  if (!dev) return preferred;
+  for (let offset = 0; offset < MAX_PORT_ATTEMPTS; offset += 1) {
+    const candidate = preferred + offset;
+    // Sequential by necessity: each probe binds the very port the next test
+    // assumes is free, so they cannot overlap.
+    if (await isPortAvailable(candidate)) {
+      if (offset > 0) {
+        console.warn(`> Port ${preferred} is in use, using ${candidate} instead.`);
+        // Worth saying out loud, because the two failures look alike and only one
+        // of them is fixable by moving ports. Next holds a lock on this project's
+        // build directory, so if what is holding the port is another `npm run dev`
+        // for *this* app, it will refuse to start on 3001 as well — with the far
+        // less obvious "Unable to acquire lock" message.
+        console.warn("> If this is another dev server for this project, stop it: the build directory lock is per project, not per port.");
+      }
+      return candidate;
+    }
+  }
+  return preferred;
+}
+
+const port = await resolvePort(Number(process.env.PORT ?? 3000));
+// Next reads `PORT` for its dev-server URLs and restart bookkeeping, so it has
+// to reflect the port actually in use rather than the one that was requested.
+process.env.PORT = String(port);
 const nextApp = next({ dev, hostname, port });
 const handle = nextApp.getRequestHandler();
-const prisma = new PrismaClient();
+
+/**
+ * The Socket.IO client, separate from the one in `lib/prisma.ts` because that
+ * file is TypeScript and this process runs under plain Node.
+ *
+ * This one only authenticates a socket and sweeps stale connections every five
+ * minutes, so it is given a much smaller pool than the application's. Both share
+ * the sizing rule in `lib/prisma-pool.mjs` — together they must stay well under
+ * what the database will hand out, and Prisma's default of 17 each does not.
+ */
+const SOCKET_CONNECTION_LIMIT = 2;
+const prisma = new PrismaClient({
+  datasourceUrl: pooledDatabaseUrl(process.env.DATABASE_URL, SOCKET_CONNECTION_LIMIT),
+});
 
 /**
  * Must match lib/auth/cookie-names.ts. The `__Host-` prefix is only legal
@@ -135,9 +248,20 @@ const revalidateSockets = setInterval(async () => {
 }, 5 * 60_000);
 revalidateSockets.unref();
 
-httpServer.listen(port, hostname, () => {
-  console.log(`> Event management server ready on http://${hostname}:${port}`);
-});
+listenOnAvailablePort(httpServer, port)
+  .then((listeningOn) => {
+    // The bound port is what every URL has to name, and it can differ from the
+    // requested one if something took it in between.
+    if (listeningOn !== port) {
+      console.warn(`> Port ${port} was taken while starting, using ${listeningOn} instead.`);
+      process.env.PORT = String(listeningOn);
+    }
+    console.log(`> Event management server ready on http://${hostname}:${listeningOn}`);
+  })
+  .catch((error) => {
+    console.error("> Failed to start the server:", error instanceof Error ? error.message : error);
+    process.exit(1);
+  });
 
 async function shutdown() {
   clearInterval(revalidateSockets);

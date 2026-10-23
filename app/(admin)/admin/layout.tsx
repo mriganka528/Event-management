@@ -3,6 +3,7 @@ import { NotificationAudience } from "@prisma/client";
 import { AdminSidebar } from "./component/admin-sidebar";
 import { requireAdmin } from "@/lib/auth/server";
 import { prisma } from "@/lib/prisma";
+import { getBusinessSettings } from "@/lib/settings";
 import { toNotificationView } from "@/lib/notification-links";
 import { AdminNotificationCenter } from "@/components/admin/notification-center";
 import { formatRoleLabel } from "@/lib/role-label";
@@ -16,7 +17,8 @@ export default async function AdminLayout({ children }: Readonly<{ children: Rea
   // 2FA-disabled admin loses access immediately.
   const user = await requireAdmin();
   const [settings, notifications] = await Promise.all([
-    prisma.businessSetting.findUnique({ where: { id: "default" }, select: { businessName: true } }).catch(() => null),
+    // Cached across requests; invalidated when the settings screen saves.
+    getBusinessSettings(),
     prisma.notification
       .findMany({
         where: { userId: user.id, audience: NotificationAudience.ADMIN },
@@ -25,7 +27,7 @@ export default async function AdminLayout({ children }: Readonly<{ children: Rea
       })
       .catch(() => []),
   ]);
-  const businessName = settings?.businessName?.trim() || "Event Management";
+  const businessName = settings.businessName;
 
   const items = notifications.map((notification) => toNotificationView(notification, "ADMIN"));
   const unread = items.filter((item) => !item.read).length;
@@ -40,7 +42,7 @@ export default async function AdminLayout({ children }: Readonly<{ children: Rea
   return (
     <div className="min-h-screen sm:py-6">
       <div className="mx-auto flex w-full px-4 lg:px-10 flex-col gap-4 lg:flex-row lg:items-start lg:gap-6">
-        <AdminSidebar businessName={businessName} account={account} />
+        <AdminSidebar businessName={businessName} logoUrl={settings.logoUrl} account={account} />
         <div className="min-w-0 flex-1">
           <div className="mb-4 flex justify-end">
             <AdminNotificationCenter initialItems={items} initialUnread={unread} />

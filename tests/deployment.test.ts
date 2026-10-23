@@ -16,9 +16,22 @@ test("preview builds do not run production migrations", () => {
   assert.match(build, /process\.env\.VERCEL_ENV === "production"/);
   assert.match(build, /process\.env\.ALLOW_PREVIEW_MIGRATIONS === "true"/);
   assert.match(build, /if \(production \|\| allowPreview\)/);
-  assert.match(build, /run\("npx", \["prisma", "migrate", "deploy"\]\)/);
+  assert.match(build, /spawnAndCollect\("npx", \["prisma", "migrate", "deploy"\]\)/);
+  assert.match(build, /P1002/);
+  assert.match(build, /advisory lock/i);
+  assert.match(build, /attempts = 3/);
   assert.match(build, /skipping prisma migrate deploy/);
-  assert.match(build, /run\("npx", \["next", "build"\]\)/);
+  assert.match(build, /await run\("npx", \["next", "build"\]\)/);
+});
+
+test("migrations use a direct database connection rather than the pooler", () => {
+  const config = readFileSync("prisma.config.ts", "utf8");
+  assert.match(config, /migrationDatabaseUrl\(\)/);
+  assert.match(config, /url: databaseUrl/);
+
+  // The runtime client must keep using the pooled DATABASE_URL. Only the CLI
+  // switches to the direct host.
+  assert.match(readFileSync("lib/prisma.ts", "utf8"), /pooledDatabaseUrl\(process\.env\.DATABASE_URL, CONNECTION_LIMIT\)/);
 });
 
 test("a database snapshot can be taken before a restore or migration", () => {

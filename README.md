@@ -39,8 +39,9 @@ See `.env.example` for the full list. The ones without a sensible default:
 
 | Variable | Purpose |
 | --- | --- |
-| `DATABASE_URL` | PostgreSQL connection string |
-| `NEXT_PUBLIC_SITE_URL` | Canonical origin of the deployment |
+| `DATABASE_URL` | PostgreSQL connection string (pooled URL is fine for the app) |
+| `DIRECT_URL` | Optional non-pooled URL for migrations; Neon derives it automatically |
+| `NEXT_PUBLIC_SITE_URL` | Canonical origin, e.g. `https://planora-sage-ten.vercel.app` in production and `http://localhost:3000` locally |
 | `NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY`, `CLERK_SECRET_KEY` | Customer sign-in |
 | `NEXT_PUBLIC_RAZORPAY_KEY_ID`, `RAZORPAY_KEY_ID`, `RAZORPAY_KEY_SECRET`, `RAZORPAY_WEBHOOK_SECRET` | Payments |
 | `NEXT_PUBLIC_CLOUDINARY_CLOUD_NAME`, `CLOUDINARY_API_KEY`, `CLOUDINARY_API_SECRET` | Image uploads |
@@ -81,8 +82,19 @@ npm run auth:reset       # remove every login; requires -- --confirm
 The app is built for a Node-compatible serverless platform such as Vercel.
 `vercel.json` runs `prisma generate`, `prisma migrate deploy`, and `next build`.
 
-Set the environment variables in the platform's dashboard, then deploy. Three
-things are worth checking before going live:
+Set the environment variables in the platform's dashboard, then deploy. Set
+`NEXT_PUBLIC_SITE_URL` to the public origin (for this deployment,
+`https://planora-sage-ten.vercel.app`). Locally it falls back to
+`http://localhost:3000`.
+
+Migrations use a direct database connection: `prisma.config.ts` picks
+`DIRECT_URL`, `DATABASE_URL_UNPOOLED`, or `POSTGRES_URL_NON_POOLING` when one is
+present, and otherwise removes Neon's `-pooler` hostname. This avoids the
+advisory-lock timeout (`P1002`) that a transaction-mode pooler can cause. The
+Vercel build script also retries a busy migration lock so two overlapping
+production builds do not fail each other.
+
+Three things are worth checking before going live:
 
 - The live socket needs a long-lived Node process, so a serverless deployment
   falls back to polling for new notifications. The rest of the application is

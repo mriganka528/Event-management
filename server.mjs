@@ -160,8 +160,8 @@ const sha256 = (value) => createHash("sha256").update(value).digest("hex");
 await nextApp.prepare();
 
 const httpServer = createServer((request, response) => handle(request, response));
-const configuredOrigins = (process.env.APP_URL ?? process.env.NEXT_PUBLIC_SITE_URL ?? "").split(",").map((value) => value.trim()).filter(Boolean).map((value) => { try { return new URL(value).origin; } catch { return null; } }).filter(Boolean);
-if (!dev && configuredOrigins.length === 0) throw new Error("APP_URL or NEXT_PUBLIC_SITE_URL is required in production for Socket.IO origin protection.");
+const configuredOrigins = (process.env.NEXT_PUBLIC_SITE_URL ?? process.env.APP_URL ?? "").split(",").map((value) => value.trim()).filter(Boolean).map((value) => { try { return new URL(value).origin; } catch { return null; } }).filter(Boolean);
+if (!dev && configuredOrigins.length === 0) throw new Error("NEXT_PUBLIC_SITE_URL or APP_URL is required in production for Socket.IO origin protection.");
 const allowedOrigins = configuredOrigins.length > 0 ? configuredOrigins : [`http://localhost:${port}`, `http://127.0.0.1:${port}`, `http://0.0.0.0:${port}`];
 const io = new SocketIOServer(httpServer, {
   path: "/api/socket.io",

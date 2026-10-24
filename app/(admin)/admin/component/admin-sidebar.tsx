@@ -3,7 +3,7 @@
 import Link from "next/link";
 import Image from "next/image";
 import { usePathname } from "next/navigation";
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   Bell,
   CalendarDays,
@@ -218,6 +218,25 @@ function SidebarContent({
 export function AdminSidebar({ businessName, logoUrl, account }: { businessName: string; logoUrl?: string | null; account: { name: string; roleLabel: string } }) {
   const pathname = usePathname();
   const [isOpen, setIsOpen] = useState(false);
+  const toggleRef = useRef<HTMLButtonElement>(null);
+  const drawerRef = useRef<HTMLDivElement>(null);
+
+  /*
+   * Tapping anywhere outside the drawer dismisses it, not only the backdrop and
+   * the close button. The toggle itself is excluded: pressing the hamburger
+   * while open must toggle the drawer rather than close it on pointerdown and
+   * reopen it on click.
+   */
+  useEffect(() => {
+    if (!isOpen) return;
+    const onPointerDown = (event: PointerEvent) => {
+      if (!(event.target instanceof Node)) return;
+      if (toggleRef.current?.contains(event.target) || drawerRef.current?.contains(event.target)) return;
+      setIsOpen(false);
+    };
+    document.addEventListener("pointerdown", onPointerDown);
+    return () => document.removeEventListener("pointerdown", onPointerDown);
+  }, [isOpen]);
 
   return (
     <>
@@ -241,6 +260,7 @@ export function AdminSidebar({ businessName, logoUrl, account }: { businessName:
           </div>
         </div>
         <button
+          ref={toggleRef}
           type="button"
           onClick={() => setIsOpen((current) => !current)}
           className="inline-flex h-11 w-11 items-center justify-center rounded-2xl border border-[var(--line)] bg-[var(--card)] text-[var(--foreground)]"
@@ -252,6 +272,7 @@ export function AdminSidebar({ businessName, logoUrl, account }: { businessName:
       </header>
 
       <div
+        ref={drawerRef}
         className={cn(
           "fixed inset-0 z-40 bg-black/45 transition-opacity duration-300 lg:hidden",
           isOpen ? "pointer-events-auto opacity-100" : "pointer-events-none opacity-0",

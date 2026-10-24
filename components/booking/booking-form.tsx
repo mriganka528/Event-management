@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useActionState } from "react";
 import { toast } from "react-hot-toast";
 import { Check, CircleHelp, Minus, Plus, Sparkles, TriangleAlert } from "lucide-react";
@@ -92,6 +92,25 @@ export function BookingForm({
     // total under the customer's eyes.
     initialServiceId ? { [initialServiceId]: 1 } : {},
   );
+
+  /**
+   * The services section sits below the package picker, and on a phone it is a
+   * full screen or more away. Choosing "Custom services" is a request to work
+   * on that list, so take the customer there instead of leaving them at the
+   * radio button wondering where the services are.
+   */
+  const servicesSectionRef = useRef<HTMLElement | null>(null);
+  const chooseCustomServices = useCallback(() => {
+    setPackageId("");
+    // Wait for the selection to paint, then scroll. `scroll-mt-28` on the
+    // section keeps its heading clear of the sticky site header.
+    window.requestAnimationFrame(() => {
+      servicesSectionRef.current?.scrollIntoView({
+        behavior: window.matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth",
+        block: "start",
+      });
+    });
+  }, []);
 
   useEffect(() => {
     if (state.success) toast.success(state.success);
@@ -480,7 +499,7 @@ export function BookingForm({
           </div>
           <fieldset disabled={isSubmitting} className="m-0 grid min-w-0 gap-3 border-0 p-0">
             <label className={`flex cursor-pointer items-start gap-3 rounded-2xl border p-4 transition ${!packageId ? "border-amber-400 bg-amber-50" : "border-stone-200 hover:border-amber-300"}`}>
-              <input className="mt-1 accent-amber-600" type="radio" name="packageId" value="" checked={!packageId} onChange={() => setPackageId("")} />
+              <input className="mt-1 accent-amber-600" type="radio" name="packageId" value="" checked={!packageId} onChange={chooseCustomServices} />
               <span>
                 <span className="block font-semibold text-[var(--foreground)]">Custom services</span>
                 <span className="mt-1 block text-sm text-[var(--muted)]">Build a quote from the services you choose below.</span>
@@ -501,7 +520,11 @@ export function BookingForm({
           </fieldset>
         </section>
 
-        <section className="rounded-[28px] border border-[var(--line)] bg-[var(--card)] p-6 shadow-sm md:p-8">
+        <section
+          ref={servicesSectionRef}
+          id="services"
+          className="scroll-mt-28 rounded-[28px] border border-[var(--line)] bg-[var(--card)] p-6 shadow-sm md:p-8"
+        >
           <div className="mb-6 flex items-start justify-between gap-4">
             <div>
               <h2 className="text-2xl font-semibold">Add services</h2>

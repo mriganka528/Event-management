@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import { Menu, X } from "lucide-react";
 import { AccountAccess } from "@/components/layout/account-access";
@@ -21,18 +21,29 @@ import type { PublicNavItem } from "@/components/layout/site-header";
 export function PublicHeaderMenu({ nav }: { nav: readonly PublicNavItem[] }) {
   const [open, setOpen] = useState(false);
   const account = usePublicAccount();
+  const containerRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     if (!open) return;
     const onKeyDown = (event: KeyboardEvent) => {
       if (event.key === "Escape") setOpen(false);
     };
+    // Any click outside the menu and its trigger closes it. The transparent
+    // backdrop below catches most of these, but listening on the document also
+    // covers clicks on elements that paint above the backdrop.
+    const onPointerDown = (event: PointerEvent) => {
+      if (event.target instanceof Node && !containerRef.current?.contains(event.target)) setOpen(false);
+    };
     document.addEventListener("keydown", onKeyDown);
-    return () => document.removeEventListener("keydown", onKeyDown);
+    document.addEventListener("pointerdown", onPointerDown);
+    return () => {
+      document.removeEventListener("keydown", onKeyDown);
+      document.removeEventListener("pointerdown", onPointerDown);
+    };
   }, [open]);
 
   return (
-    <div className="relative lg:hidden">
+    <div ref={containerRef} className="relative lg:hidden">
       <button
         type="button"
         onClick={() => setOpen((current) => !current)}

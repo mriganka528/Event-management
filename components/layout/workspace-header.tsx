@@ -65,6 +65,15 @@ export function WorkspaceHeader({
     const onKeyDown = (event: KeyboardEvent) => {
       if (event.key === "Escape") closeMenu(true);
     };
+    // A click anywhere other than the toggle and its panel dismisses the
+    // disclosure — including the other controls in the bar. The transparent
+    // backdrop below catches the page area; this listener also covers anything
+    // painted above it.
+    const onPointerDown = (event: PointerEvent) => {
+      if (!(event.target instanceof Node)) return;
+      if (toggleRef.current?.contains(event.target) || panelRef.current?.contains(event.target)) return;
+      closeMenu();
+    };
 
     const media = window.matchMedia("(min-width: 640px)");
     const onBreakpoint = () => {
@@ -74,11 +83,13 @@ export function WorkspaceHeader({
     const previousOverflow = document.body.style.overflow;
     document.body.style.overflow = "hidden";
     document.addEventListener("keydown", onKeyDown);
+    document.addEventListener("pointerdown", onPointerDown);
     media.addEventListener("change", onBreakpoint);
 
     return () => {
       document.body.style.overflow = previousOverflow;
       document.removeEventListener("keydown", onKeyDown);
+      document.removeEventListener("pointerdown", onPointerDown);
       media.removeEventListener("change", onBreakpoint);
     };
   }, [open, closeMenu]);
